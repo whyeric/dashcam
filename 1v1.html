@@ -100,7 +100,12 @@
         var data
         try { data = JSON.parse(event.data) } catch (e) { return }
 
-        if (data.type === "player_connected") {
+        if (data.type === "state") {
+          // Authoritative roster sent on (re)connect — set both overlays at once.
+          setWaiting("p1", data.players.indexOf("p1") === -1)
+          setWaiting("p2", data.players.indexOf("p2") === -1)
+          console.log("[1v1] state — players:", data.players)
+        } else if (data.type === "player_connected") {
           setWaiting(data.player, false)            // hide the waiting overlay
           console.log("[1v1]", data.player, "connected")
         } else if (data.type === "player_disconnected") {

@@ -83,6 +83,10 @@
           var ws = new WebSocket(WS_URL);
 
           ws.onopen = function () {
+            // Register as a screen so the relay adds us to its client list and
+            // fans out every controller input to us (without this the relay's
+            // register() blocks on recv() forever and we get nothing).
+            ws.send(JSON.stringify({ type: "register", role: "screen" }));
             console.log("[input-bridge] Connected to", WS_URL);
           };
 

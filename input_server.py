@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import websockets
 
 # Connected clients.  ws -> {"role": "screen"|"controller", "player": "p1"|"p2"|None}
@@ -65,6 +66,9 @@ async def register(websocket):
 
     if role == "screen":
         clients[websocket] = {"role": "screen", "player": None}
+        # Tell the freshly-connected screen who is already playing, so a screen
+        # that opens (or reconnects) after a phone joined clears its overlays.
+        await send_json(websocket, {"type": "state", "players": sorted(assigned_players())})
         print("[server] Game screen connected.")
         return ("screen", None)
 
@@ -139,8 +143,8 @@ async def handler(websocket):
 
 
 async def main():
-    host = "0.0.0.0"  # 0.0.0.0 so phones on the same network can connect
-    port = 8765
+    host = os.environ.get("RELAY_HOST", "0.0.0.0")  # 0.0.0.0 so phones on the same network can connect
+    port = int(os.environ.get("RELAY_PORT", "8765"))  # override for tests / multiple instances
     print(f"[server] Starting WebSocket server on ws://{host}:{port}")
     print("[server] screen -> {'role':'screen'} ; controller -> {'role':'controller','player':'p1'|'p2'}")
     async with websockets.serve(handler, host, port):
