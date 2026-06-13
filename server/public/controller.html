@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Phone Controller (test)</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #0d1117;
+        color: #e6edf3;
+        padding: 14px;
+        touch-action: manipulation;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      h1 { font-size: 14px; color: #7d8590; margin: 0 0 4px; letter-spacing: 0.5px; }
+      .note { font-size: 11px; color: #6e7681; margin-bottom: 12px; }
+      .status { font-size: 13px; margin-bottom: 12px; }
+      .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid #30363d; font-size: 12px; }
+      .pill.ok { color: #3fb950; border-color: #2ea04340; background: #2ea04318; }
+      .pill.bad { color: #f85149; border-color: #f8514940; background: #f8514918; }
+
+      .join { display: flex; gap: 8px; margin-bottom: 16px; }
+      input[type="tel"] {
+        flex: 1; font-size: 28px; text-align: center; letter-spacing: 8px;
+        padding: 12px; border-radius: 10px; border: 1px solid #30363d;
+        background: #161b22; color: #e6edf3; font-family: inherit;
+      }
+
+      button {
+        font-family: inherit; font-weight: 700; color: #e6edf3;
+        background: #21262d; border: 1px solid #30363d; border-radius: 12px;
+        padding: 18px; font-size: 16px; touch-action: manipulation;
+      }
+      button:active { transform: scale(0.97); }
+      button:disabled { opacity: 0.4; }
+
+      .btn-join { background: #1f6feb; border-color: #1f6feb; padding: 12px 18px; }
+      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+      .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+
+      .run.on { background: #238636; border-color: #2ea043; }
+      .lane.on { background: #1f6feb; border-color: #388bfd; }
+      .plank.on { background: #8957e5; border-color: #a371f7; }
+      .jump { background: #1f6feb33; border-color: #1f6feb; }
+      .duck { background: #8957e533; border-color: #8957e5; }
+
+      .section { margin-bottom: 16px; }
+      .label { font-size: 12px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+      .slider-row { display: flex; align-items: center; gap: 10px; }
+      input[type="range"] { flex: 1; }
+      .ival { width: 48px; text-align: right; font-size: 16px; }
+
+      #log { font-size: 11px; color: #6e7681; height: 88px; overflow-y: auto; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px; }
+      .err { color: #f85149; }
+      .ack { color: #3fb950; }
+      .hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>PHONE CONTROLLER · TEST HARNESS</h1>
+    <div class="note">Manual controls to test the transport. NOT the real pose-detection controller (that's a separate task).</div>
+
+    <div class="status">
+      socket: <span id="sock" class="pill bad">connecting…</span>
+      &nbsp; session: <span id="sess" class="pill bad">not joined</span>
+    </div>
+
+    <div class="join" id="joinRow">
+      <input id="code" type="tel" inputmode="numeric" maxlength="4" placeholder="0000" />
+      <button class="btn-join" id="joinBtn">JOIN</button>
+    </div>
+
+    <div id="controls" class="hidden">
+      <div class="section">
+        <div class="label">Run (high knees) — sends running_state @10Hz while ON</div>
+        <button class="run" id="runBtn" style="width:100%">RUN: OFF</button>
+        <div class="slider-row" style="margin-top:10px">
+          <span class="label" style="margin:0">intensity</span>
+          <input type="range" id="intensity" min="0" max="1" step="0.05" value="0.8" />
+          <span class="ival" id="ival">0.80</span>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="label">Lane (lean) — heartbeat @5Hz + on tap</div>
+        <div class="grid3">
+          <button class="lane" data-lane="-1">◀ LEFT</button>
+          <button class="lane on" data-lane="0">CENTER</button>
+          <button class="lane" data-lane="1">RIGHT ▶</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="label">Plank (jetpack) — toggle, heartbeat while ON</div>
+        <button class="plank" id="plankBtn" style="width:100%">PLANK: OFF</button>
+      </div>
+
+      <div class="section">
+        <div class="label">One-shot events</div>
+        <div class="grid2">
+          <button class="jump" id="jumpBtn">JUMP ⤒</button>
+          <button class="duck" id="duckBtn">DUCK ⤓</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="label">server log</div>
+    <div id="log"></div>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+      const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+
+      let ws, joined = false;
+      const state = { running: false, lane: 0, plank: false, intensity: 0.8 };
+      let runTimer = null, laneTimer = null, plankTimer = null;
+
+      // ---- connection ----
+      function connect() {
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => setPill("sock", true, "open");
+        ws.onclose = () => {
+          setPill("sock", false, "closed");
+          setPill("sess", false, "not joined");
+          joined = false; stopAllTimers(); showControls(false);
+          log("socket closed — reconnecting in 1.5s", "err");
+          setTimeout(connect, 1500);
+        };
+        ws.onerror = () => log("socket error", "err");
+        ws.onmessage = (e) => {
+          let m; try { m = JSON.parse(e.data); } catch { return; }
+          handle(m);
+        };
+      }
+
+      function handle(m) {
+        switch (m.type) {
+          case "session:joined":
+            joined = true;
+            setPill("sess", true, m.data.sessionCode);
+            showControls(true);
+            startLaneHeartbeat();
+            log("joined session " + m.data.sessionCode, "ack");
+            break;
+          case "error":
+            log("ERROR " + m.data.code + " — " + m.data.message, "err");
+            if (m.data.code === "SESSION_NOT_FOUND" || m.data.code === "SESSION_FULL") {
+              joined = false; setPill("sess", false, "not joined"); showControls(false);
+            }
+            break;
+          case "pong": break;
+        }
+      }
+
+      function send(type, data = {}) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, data, t: Date.now() }));
+      }
+
+      // ---- join ----
+      $("#joinBtn").onclick = () => {
+        const code = $("#code").value.trim();
+        if (!/^\d{4}$/.test(code)) { log("enter a 4-digit code", "err"); return; }
+        send("phone:join", { sessionCode: code });
+        log("→ phone:join " + code);
+      };
+
+      // ---- run toggle (running_state @10Hz) ----
+      $("#runBtn").onclick = () => {
+        state.running = !state.running;
+        $("#runBtn").classList.toggle("on", state.running);
+        $("#runBtn").textContent = "RUN: " + (state.running ? "ON" : "OFF");
+        if (state.running) {
+          runTimer = setInterval(() => send("phone:running_state", { intensity: state.intensity }), 100);
+        } else {
+          clearInterval(runTimer); runTimer = null; // heartbeats cease -> server times out in ~300ms
+        }
+      };
+      $("#intensity").oninput = (e) => { state.intensity = parseFloat(e.target.value); $("#ival").textContent = state.intensity.toFixed(2); };
+
+      // ---- lane (heartbeat @5Hz + immediate on tap) ----
+      document.querySelectorAll("button.lane").forEach((b) => {
+        b.onclick = () => {
+          state.lane = parseInt(b.dataset.lane, 10);
+          document.querySelectorAll("button.lane").forEach((x) => x.classList.toggle("on", x === b));
+          send("phone:lane_position", { lane: state.lane });
+        };
+      });
+      function startLaneHeartbeat() {
+        clearInterval(laneTimer);
+        laneTimer = setInterval(() => send("phone:lane_position", { lane: state.lane }), 200);
+      }
+
+      // ---- plank toggle ----
+      $("#plankBtn").onclick = () => {
+        state.plank = !state.plank;
+        $("#plankBtn").classList.toggle("on", state.plank);
+        $("#plankBtn").textContent = "PLANK: " + (state.plank ? "ON" : "OFF");
+        send("phone:plank_state", { active: state.plank });
+        if (state.plank) {
+          plankTimer = setInterval(() => send("phone:plank_state", { active: true }), 200);
+        } else {
+          clearInterval(plankTimer); plankTimer = null;
+        }
+      };
+
+      // ---- one-shot events ----
+      $("#jumpBtn").onclick = () => { send("phone:jump", {}); flash("#jumpBtn"); };
+      $("#duckBtn").onclick = () => { send("phone:duck", {}); flash("#duckBtn"); };
+
+      // ---- helpers ----
+      function stopAllTimers() { [runTimer, laneTimer, plankTimer].forEach(clearInterval); runTimer = laneTimer = plankTimer = null; state.running = false; state.plank = false; }
+      function showControls(on) { $("#controls").classList.toggle("hidden", !on); $("#joinRow").classList.toggle("hidden", on); }
+      function setPill(id, ok, text) { const el = $("#" + id); el.textContent = text; el.className = "pill " + (ok ? "ok" : "bad"); }
+      function flash(sel) { const el = $(sel); el.style.filter = "brightness(1.8)"; setTimeout(() => (el.style.filter = ""), 120); }
+      function log(text, cls) {
+        const el = document.createElement("div");
+        if (cls) el.className = cls;
+        el.textContent = new Date().toLocaleTimeString() + "  " + text;
+        const box = $("#log"); box.prepend(el);
+        while (box.childElementCount > 40) box.removeChild(box.lastChild);
+      }
+
+      connect();
+    </script>
+  </body>
+</html>
