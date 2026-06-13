@@ -1,126 +1,204 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Display (placeholder)</title>
+    <title>Subway Surfers — WS Display</title>
+
+    <!-- ── Unity bootstrap (carried verbatim from the master emulator) ────── -->
+    <script type="text/javascript" src="4399.z.js"></script>
+    <script>
+      window.config = {
+        loader: "unity",
+        debug: false,
+        maxRatio: 16 / 9,
+        minRatio: 9 / 16,
+        title: "Subway Surfers: San Francisco",
+        unityVersion: "2019.4.18f1",
+        unityWebglBuildUrl: "SanFrancisco.json",
+        fileSize: 35,
+        cachedDecompressedFileSizes: {
+          "SanFrancisco.asm.code.unityweb": 9077143,
+          "SanFrancisco.asm.framework.unityweb": 86369,
+          "SanFrancisco.asm.memory.unityweb": 951447,
+          "SanFrancisco.data.unityweb": 18323917,
+          "SanFrancisco.wasm.code.unityweb": 7279617,
+          "SanFrancisco.wasm.framework.unityweb": 90693,
+        },
+      };
+    </script>
+
+    <!-- ── HUD overlay styles (namespaced ws-* so they don't collide with the
+         CSS Unity injects at runtime for #game / #game-container). ────────── -->
     <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
+      #ws-hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 2147483647;
+        width: 260px;
+        pointer-events: none; /* clicks/taps pass through to the game canvas */
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        background: #0d1117;
         color: #e6edf3;
-        display: flex;
-        flex-direction: column;
-        min-height: 100vh;
-        padding: 24px;
-        gap: 20px;
       }
-      h1 { font-size: 18px; font-weight: 600; margin: 0; color: #7d8590; letter-spacing: 0.5px; }
-      .banner {
-        font-size: 13px;
-        color: #d29922;
-        background: #1c1611;
-        border: 1px solid #3a2d12;
-        border-radius: 8px;
-        padding: 10px 14px;
-      }
-      .code-box { text-align: center; padding: 24px 0; }
-      .code-label { font-size: 14px; color: #7d8590; text-transform: uppercase; letter-spacing: 2px; }
-      .code { font-size: 96px; font-weight: 800; letter-spacing: 12px; margin-top: 8px; color: #58a6ff; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-      .cell {
-        background: #161b22;
+      #ws-hud .ws-panel {
+        background: rgba(13, 17, 23, 0.82);
         border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 14px;
+        border-radius: 10px;
+        padding: 12px 14px;
+        backdrop-filter: blur(2px);
       }
-      .cell .k { font-size: 12px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; }
-      .cell .v { font-size: 32px; font-weight: 700; margin-top: 4px; }
-      .on { color: #3fb950; }
-      .off { color: #6e7681; }
-      .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #30363d; }
-      .pill.connected { color: #3fb950; border-color: #2ea04326; background: #2ea04318; }
-      .pill.disconnected { color: #f85149; border-color: #f8514926; background: #f8514918; }
-      #events {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 12px;
-        height: 180px;
-        overflow-y: auto;
-        font-size: 13px;
-        line-height: 1.6;
+      #ws-hud .ws-title {
+        font-size: 11px;
+        letter-spacing: 1px;
+        color: #7d8590;
+        text-transform: uppercase;
+        margin-bottom: 8px;
       }
-      .ev-jump { color: #58a6ff; }
-      .ev-duck { color: #d2a8ff; }
-      footer { margin-top: auto; font-size: 12px; color: #6e7681; }
+      #ws-hud .ws-code-label { font-size: 10px; color: #7d8590; letter-spacing: 2px; text-transform: uppercase; }
+      #ws-hud .ws-code { font-size: 40px; font-weight: 800; letter-spacing: 6px; color: #58a6ff; line-height: 1.1; }
+      #ws-hud .ws-pills { margin: 8px 0; font-size: 11px; color: #7d8590; }
+      #ws-hud .ws-pill {
+        display: inline-block; font-size: 10px; padding: 1px 7px; border-radius: 999px; border: 1px solid #30363d;
+      }
+      #ws-hud .ws-pill.ws-connected { color: #3fb950; border-color: #2ea04326; background: #2ea04318; }
+      #ws-hud .ws-pill.ws-disconnected { color: #f85149; border-color: #f8514926; background: #f8514918; }
+      #ws-hud .ws-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+      #ws-hud .ws-cell { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
+      #ws-hud .ws-k { font-size: 9px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; }
+      #ws-hud .ws-v { font-size: 18px; font-weight: 700; margin-top: 2px; }
+      #ws-hud .ws-v.on { color: #3fb950; }
+      #ws-hud .ws-v.off { color: #6e7681; }
+      #ws-hud .ws-bar { height: 6px; background: #21262d; border-radius: 999px; margin-top: 6px; overflow: hidden; }
+      #ws-hud .ws-bar-fill { height: 100%; width: 0%; background: #3fb950; transition: width 0.08s linear; }
+      #ws-hud .ws-events {
+        margin-top: 8px; max-height: 96px; overflow: hidden; font-size: 11px; line-height: 1.5; color: #8b949e;
+      }
+      #ws-hud .ws-ev-jump { color: #58a6ff; }
+      #ws-hud .ws-ev-duck { color: #d2a8ff; }
+      #ws-hud .ws-status { margin-top: 8px; font-size: 10px; color: #6e7681; }
     </style>
   </head>
   <body>
-    <h1>SUBWAY-STYLE RUNNER · DISPLAY (placeholder)</h1>
-    <div class="banner">
-      This is NOT the game renderer — it just proves the transport. A teammate replaces this page with the
-      real canvas, which reads the same <code>input:state</code> / <code>input:event</code> contract.
-    </div>
-
-    <div class="code-box">
-      <div class="code-label">Pairing code — type this on the phone</div>
-      <div class="code" id="code">····</div>
-      <div style="margin-top: 12px">
-        phone: <span id="phone" class="pill disconnected">disconnected</span>
-        · socket: <span id="socket" class="pill disconnected">connecting…</span>
+    <!-- ── HUD overlay. Reflects the live input:state / input:event stream so
+         signals with no keyboard analog (running / intensity / plank) are still
+         visible — this is what makes the steady_run scenario observable. ────── -->
+    <div id="ws-hud">
+      <div class="ws-panel">
+        <div class="ws-title">Subway Surfers · WS display</div>
+        <div class="ws-code-label">pairing code</div>
+        <div class="ws-code" id="ws-code">····</div>
+        <div class="ws-pills">
+          phone <span id="ws-phone" class="ws-pill ws-disconnected">disconnected</span>
+          · socket <span id="ws-socket" class="ws-pill ws-disconnected">connecting…</span>
+        </div>
+        <div class="ws-grid">
+          <div class="ws-cell"><div class="ws-k">running</div><div class="ws-v off" id="ws-running">no</div></div>
+          <div class="ws-cell"><div class="ws-k">intensity</div><div class="ws-v" id="ws-intensity">0.00</div></div>
+          <div class="ws-cell"><div class="ws-k">lane</div><div class="ws-v" id="ws-lane">center</div></div>
+          <div class="ws-cell"><div class="ws-k">plank</div><div class="ws-v off" id="ws-plank">off</div></div>
+        </div>
+        <div class="ws-bar"><div class="ws-bar-fill" id="ws-bar-fill"></div></div>
+        <div class="ws-events" id="ws-events"></div>
+        <div class="ws-status" id="ws-status">connecting…</div>
       </div>
     </div>
 
-    <div class="grid">
-      <div class="cell"><div class="k">Running</div><div class="v off" id="running">no</div></div>
-      <div class="cell"><div class="k">Intensity</div><div class="v" id="intensity">0.00</div></div>
-      <div class="cell"><div class="k">Lane</div><div class="v" id="lane">center</div></div>
-      <div class="cell"><div class="k">Plank / jetpack</div><div class="v off" id="plank">off</div></div>
-    </div>
+    <!-- Unity loader (builds #game-container / #game / canvas itself and mounts
+         them on document.body). Classic script: runs during parse, before the
+         module below — so loader.js sees itself as the last script and resolves
+         its asset root correctly. -->
+    <script src="loader.js"></script>
 
-    <div>
-      <div class="cell" style="border: none; padding: 0 0 8px; background: none">
-        <div class="k">Discrete events (jump / duck)</div>
-      </div>
-      <div id="events"></div>
-    </div>
+    <!-- ── WebSocket bridge: server input:state / input:event → emulator keys ─ -->
+    <script type="module">
+      import { EmulatorInput, KEY_INFO } from "./emulatorInput.js";
 
-    <footer id="status">connecting…</footer>
-
-    <script>
       const $ = (id) => document.getElementById(id);
-      const LANE_NAMES = { "-1": "left", 0: "center", 1: "right" };
-
+      const LANE_NAMES = { "-1": "left", "0": "center", "1": "right" };
       const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+
+      // Shared interpretation logic — the server's Game stub runs the same module.
+      const emu = new EmulatorInput();
       let ws;
 
+      // ── emulator input: dispatch synthetic KeyboardEvents on the canvas ──────
+      // (the only input surface the Unity WASM build exposes). Dispatching on the
+      // canvas with bubbles:true reaches the document-level emscripten handler.
+      function getCanvas() {
+        return document.querySelector("#game canvas") || document.querySelector("canvas");
+      }
+      function gameReady() {
+        return !!(getCanvas() && window.unityGame);
+      }
+
+      const TAP_HOLD_MS = 80; // keydown→keyup gap (one discrete press)
+      const TAP_GAP_MS = 140; // spacing between queued taps so they stay distinct
+      const tapQueue = [];
+      let draining = false;
+
+      function dispatchTap(cmd) {
+        const canvas = getCanvas();
+        const info = KEY_INFO[cmd];
+        if (!canvas || !info) return;
+        const opts = {
+          keyCode: info.keyCode,
+          which: info.keyCode,
+          code: info.code,
+          key: info.key,
+          bubbles: true,
+          cancelable: true,
+        };
+        canvas.dispatchEvent(new KeyboardEvent("keydown", opts));
+        setTimeout(() => canvas.dispatchEvent(new KeyboardEvent("keyup", opts)), TAP_HOLD_MS);
+      }
+
+      function enqueueTaps(cmds) {
+        if (!cmds || !cmds.length) return;
+        tapQueue.push(...cmds);
+        drain();
+      }
+      function drain() {
+        if (draining) return;
+        const cmd = tapQueue.shift();
+        if (cmd === undefined) return;
+        draining = true;
+        dispatchTap(cmd);
+        setTimeout(() => {
+          draining = false;
+          drain();
+        }, TAP_GAP_MS);
+      }
+
+      // ── WebSocket: the display side of the contract (PLAN/README) ────────────
       function connect() {
         ws = new WebSocket(wsUrl);
 
         ws.addEventListener("open", () => {
-          setPill("socket", true, "open");
-          $("status").textContent = "connected — creating session…";
+          setPill("ws-socket", true, "open");
+          $("ws-status").textContent = "connected — creating session…";
           send("display:create_session", {});
         });
 
         ws.addEventListener("close", () => {
-          setPill("socket", false, "closed");
-          setPill("phone", false, "disconnected");
-          $("status").textContent = "socket closed — reconnecting in 1s…";
+          setPill("ws-socket", false, "closed");
+          setPill("ws-phone", false, "disconnected");
+          $("ws-status").textContent = "socket closed — reconnecting in 1s…";
           setTimeout(connect, 1000);
         });
 
         ws.addEventListener("error", () => {
-          $("status").textContent = "socket error";
+          $("ws-status").textContent = "socket error";
         });
 
         ws.addEventListener("message", (e) => {
           let msg;
-          try { msg = JSON.parse(e.data); } catch { return; }
+          try {
+            msg = JSON.parse(e.data);
+          } catch {
+            return;
+          }
           handle(msg);
         });
       }
@@ -134,55 +212,60 @@
       function handle(msg) {
         switch (msg.type) {
           case "session:created":
-            $("code").textContent = msg.data.sessionCode;
-            $("status").textContent = "session " + msg.data.sessionCode + " — waiting for phone…";
+            $("ws-code").textContent = msg.data.sessionCode;
+            $("ws-status").textContent = "session " + msg.data.sessionCode + " — pair a phone";
             break;
           case "phone:status":
-            setPill("phone", msg.data.connected, msg.data.connected ? "connected" : "disconnected");
-            $("status").textContent = msg.data.connected ? "phone paired ✓" : "phone left — runner will stop";
+            setPill("ws-phone", msg.data.connected, msg.data.connected ? "connected" : "disconnected");
+            $("ws-status").textContent = msg.data.connected ? "phone paired ✓" : "phone left — runner will stop";
             break;
           case "input:state":
             renderState(msg.data);
+            // lane is absolute; emu turns the delta into relative ←/→ taps.
+            if (gameReady()) enqueueTaps(emu.onState(msg.data));
             break;
           case "input:event":
             logEvent(msg.data);
+            if (gameReady()) enqueueTaps(emu.onEvent(msg.data.type));
             break;
           case "error":
-            $("status").textContent = "error: " + msg.data.code + " — " + msg.data.message;
+            $("ws-status").textContent = "error: " + msg.data.code + " — " + msg.data.message;
             break;
           case "pong":
             break;
         }
       }
 
+      // ── HUD rendering ────────────────────────────────────────────────────────
       function renderState(s) {
-        const running = $("running");
+        const running = $("ws-running");
         running.textContent = s.running ? "yes" : "no";
-        running.className = "v " + (s.running ? "on" : "off");
+        running.className = "ws-v " + (s.running ? "on" : "off");
 
-        $("intensity").textContent = Number(s.intensity).toFixed(2);
+        const intensity = Math.max(0, Math.min(1, Number(s.intensity) || 0));
+        $("ws-intensity").textContent = intensity.toFixed(2);
+        $("ws-bar-fill").style.width = Math.round(intensity * 100) + "%";
 
-        $("lane").textContent = LANE_NAMES[String(s.lane)] ?? s.lane;
+        $("ws-lane").textContent = LANE_NAMES[String(s.lane)] ?? s.lane;
 
-        const plank = $("plank");
+        const plank = $("ws-plank");
         plank.textContent = s.plank ? "ON" : "off";
-        plank.className = "v " + (s.plank ? "on" : "off");
+        plank.className = "ws-v " + (s.plank ? "on" : "off");
       }
 
       function logEvent(ev) {
         const el = document.createElement("div");
-        const time = new Date().toLocaleTimeString();
-        el.className = ev.type === "jump" ? "ev-jump" : "ev-duck";
-        el.textContent = `[${time}] ${ev.type.toUpperCase()}  (serverT=${Math.round(ev.serverT)})`;
-        const box = $("events");
+        el.className = ev.type === "jump" ? "ws-ev-jump" : "ws-ev-duck";
+        el.textContent = new Date().toLocaleTimeString() + "  " + ev.type.toUpperCase();
+        const box = $("ws-events");
         box.prepend(el);
-        while (box.childElementCount > 50) box.removeChild(box.lastChild);
+        while (box.childElementCount > 30) box.removeChild(box.lastChild);
       }
 
       function setPill(id, ok, label) {
         const el = $(id);
         el.textContent = label;
-        el.className = "pill " + (ok ? "connected" : "disconnected");
+        el.className = "ws-pill " + (ok ? "ws-connected" : "ws-disconnected");
       }
 
       connect();
