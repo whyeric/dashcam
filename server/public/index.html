@@ -77,6 +77,7 @@
       }
       #ws-hud .ws-ev-jump { color: #58a6ff; }
       #ws-hud .ws-ev-duck { color: #d2a8ff; }
+      #ws-hud .ws-ev-key { color: #a5d6ff; }
       #ws-hud .ws-status { margin-top: 8px; font-size: 10px; color: #6e7681; }
     </style>
   </head>
@@ -129,19 +130,22 @@
       function getCanvas() {
         return document.querySelector("#game canvas") || document.querySelector("canvas");
       }
-      function gameReady() {
-        return !!(getCanvas() && window.unityGame);
+      function inputReady() {
+        return !!getCanvas();
       }
 
-      const TAP_HOLD_MS = 80; // keydown→keyup gap (one discrete press)
-      const TAP_GAP_MS = 140; // spacing between queued taps so they stay distinct
+      const TAP_HOLD_MS = 50; // keydown→keyup gap (one discrete press)
+      const TAP_GAP_MS = 80; // spacing between queued taps so they stay distinct
       const tapQueue = [];
       let draining = false;
+      let keyTapCount = 0;
 
       function dispatchTap(cmd) {
         const canvas = getCanvas();
         const info = KEY_INFO[cmd];
         if (!canvas || !info) return;
+        if (!canvas.hasAttribute("tabindex")) canvas.setAttribute("tabindex", "0");
+        canvas.focus?.();
         const opts = {
           keyCode: info.keyCode,
           which: info.keyCode,
@@ -150,8 +154,14 @@
           bubbles: true,
           cancelable: true,
         };
-        canvas.dispatchEvent(new KeyboardEvent("keydown", opts));
-        setTimeout(() => canvas.dispatchEvent(new KeyboardEvent("keyup", opts)), TAP_HOLD_MS);
+        const targets = [canvas, document, window];
+        targets.forEach((target) => target.dispatchEvent(new KeyboardEvent("keydown", opts)));
+        setTimeout(() => {
+          targets.forEach((target) => target.dispatchEvent(new KeyboardEvent("keyup", opts)));
+        }, TAP_HOLD_MS);
+        keyTapCount += 1;
+        $("ws-status").textContent = "sent key " + cmd + " (" + keyTapCount + ")";
+        logKey(cmd);
       }
 
       function enqueueTaps(cmds) {
@@ -222,11 +232,11 @@
           case "input:state":
             renderState(msg.data);
             // lane is absolute; emu turns the delta into relative ←/→ taps.
-            if (gameReady()) enqueueTaps(emu.onState(msg.data));
+            if (inputReady()) enqueueTaps(emu.onState(msg.data));
             break;
           case "input:event":
             logEvent(msg.data);
-            if (gameReady()) enqueueTaps(emu.onEvent(msg.data.type));
+            if (inputReady()) enqueueTaps(emu.onEvent(msg.data.type));
             break;
           case "error":
             $("ws-status").textContent = "error: " + msg.data.code + " — " + msg.data.message;
@@ -257,6 +267,17 @@
         const el = document.createElement("div");
         el.className = ev.type === "jump" ? "ws-ev-jump" : "ws-ev-duck";
         el.textContent = new Date().toLocaleTimeString() + "  " + ev.type.toUpperCase();
+        prependEvent(el);
+      }
+
+      function logKey(cmd) {
+        const el = document.createElement("div");
+        el.className = "ws-ev-key";
+        el.textContent = new Date().toLocaleTimeString() + "  KEY " + cmd.toUpperCase();
+        prependEvent(el);
+      }
+
+      function prependEvent(el) {
         const box = $("ws-events");
         box.prepend(el);
         while (box.childElementCount > 30) box.removeChild(box.lastChild);
