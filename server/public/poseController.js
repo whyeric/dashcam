@@ -5,25 +5,67 @@ import {
 
 const VISION_WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 const POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
-const HUMAN_CONFIDENCE_MIN = 0.28;
+// --- Detection gating -------------------------------------------------------
+const HUMAN_CONFIDENCE_MIN = 0.28;   // mean core-landmark visibility to accept a person
 const SHOULDER_VISIBILITY_MIN = 0.25;
 const CORE_VISIBILITY_MIN = 0.14;
-const INFERENCE_INTERVAL_MS = 25;
+const INFERENCE_INTERVAL_MS = 25;    // ~40 Hz pose inference cap
+
+// --- Heartbeat cadence (how often we re-assert continuous state) ------------
 const LANE_HEARTBEAT_MS = 120;
 const RUNNING_HEARTBEAT_MS = 75;
-const RUNNING_KNEE_PROXIMITY_START = 0.62;
-const RUNNING_KNEE_PROXIMITY_FULL = 0.26;
-const RUNNING_LEG_MOTION_START = 0.012;
-const RUNNING_LEG_MOTION_FULL = 0.09;``
-const FOOT_ACCEL_LANE_THRESHOLD = 8;
-const FOOT_ACCEL_LANE_REARM_THRESHOLD = 3;
-const FOOT_ACCEL_RUNNING_START = 5;
-const FOOT_ACCEL_RUNNING_FULL = 22;
-const FOOT_ACCEL_JUMP_THRESHOLD = -11;
-const FOOT_ACCEL_DUCK_THRESHOLD = 11;
-const FOOT_ACCEL_VERTICAL_REARM_THRESHOLD = 4;
-const GESTURE_COOLDOWN_MS = 200;
-const CHEST_SHOULDER_WEIGHT = 0.65;
+
+// --- Running intensity (high-knees) -----------------------------------------
+const RUNNING_KNEE_PROXIMITY_START = 0.62;  // knee drop below hip (body-scale units) where lift starts counting
+const RUNNING_KNEE_PROXIMITY_FULL = 0.26;   // knee this high -> full lift credit
+const RUNNING_LEG_MOTION_START = 0.012;     // per-frame vertical leg motion where running starts
+const RUNNING_LEG_MOTION_FULL = 0.09;       // per-frame leg motion at full intensity
+const RUNNING_SHOULDER_BOUNCE_START = 0.015; // per-frame chest bounce where running starts
+const RUNNING_SHOULDER_BOUNCE_FULL = 0.12;   // chest bounce at full intensity
+const GESTURE_COOLDOWN_MS = 200;             // min gap between jump/duck one-shots
+const CHEST_SHOULDER_WEIGHT = 0.65;          // chest control point blend: 0.65 shoulders / 0.35 hips
+
+// --- Latency compensation: predict where the body WILL be -------------------
+// We extrapolate each control point forward by a short lead time using
+// kinematics (x + v*t + 0.5*a*t^2). Velocity is EMA-smoothed before we take
+// its derivative for acceleration, and the resulting offset is hard-clamped to
+// a fraction of body scale so noisy 2nd derivatives can never blow up. This is
+// how acceleration feeds the lane/jump/duck decisions: an accelerating step
+// crosses a threshold earlier, so the on-screen move fires as you push off.
+const VELOCITY_SMOOTHING = 0.5;             // EMA weight on the new velocity sample (0..1)
+const CONTROL_PREDICTION_MS = 60;           // lead time for the chest (lane/jump/duck) control point
+const CONTROL_PREDICTION_MAX_SCALE = 0.6;   // cap chest prediction at 0.6 * body scale
+const FOOT_PREDICTION_MS = 70;              // lead time for foot control points
+const FOOT_PREDICTION_MAX_SCALE = 0.9;      // cap foot prediction at 0.9 * lane scale
+const LEAD_FOOT_VELOCITY_DEADZONE = 0.0008; // |mapped foot velocity| (per ms) below this is treated as noise
+
+// --- Lane geometry (units are "body widths" from the calibrated center) -----
+// Hysteresis: you must displace by ENTER to leave center for a side lane, but
+// only return inside RETURN to come back. ENTER > RETURN kills boundary flicker.
+const LANE_EXIT_THRESHOLD = 0.7;            // displacement to ENTER a side lane
+const LANE_RETURN_THRESHOLD = 0.4;          // displacement to fall back toward center
+const LANE_SWITCH_MIN_DWELL_MS = 70;        // ignore a second switch within this window (anti-jitter)
+
+// --- Lane decision scoring (evidence is additive, per candidate lane) -------
+const LANE_COM_SCORE = 1.0;        // predicted center-of-mass region (primary, most stable)
+const LANE_BOTH_FEET_SCORE = 0.8;  // both feet agree on the same lane
+const LANE_ONE_FOOT_SCORE = 0.35;  // a single foot in a lane
+const LANE_FAST_FOOT_SCORE = 1.2;  // a decisive lead-foot step in the candidate direction
+const LANE_VELOCITY_SCORE = 0.4;   // a foot moving toward the lane it already sits in
+const LANE_HOLD_SCORE = 0.5;       // stickiness bonus for the current lane (hysteresis)
+const LANE_ENTER_SCORE = 1.3;      // score a side lane must beat to be entered
+const LANE_CENTER_SCORE = 0.9;     // score center must reach to reclaim the runner
+
+// --- Jump / duck (vertical chest offset, in shoulder-width units) -----------
+// Image Y grows downward, so a jump is a NEGATIVE offset (chest rises).
+const JUMP_OFFSET_THRESHOLD = -0.45;          // rise this far above calibrated center to jump
+const JUMP_VELOCITY_THRESHOLD = -0.05;        // ...while moving up at least this fast (per frame)
+const JUMP_REARM_OFFSET = -0.18;              // must settle back below this before jumping again
+const DUCKING_JUMP_OFFSET_THRESHOLD = -0.55;  // harder jump bar right after a duck
+const DUCKING_JUMP_REARM_OFFSET = -0.25;
+const DUCK_OFFSET_THRESHOLD = 0.5;            // sink this far below center to duck
+const DUCK_VELOCITY_THRESHOLD = 0.05;         // ...while moving down at least this fast (per frame)
+const DUCK_REARM_OFFSET = 0.2;                // must rise back above this before ducking again
 
 const LANDMARK = Object.freeze({
   leftShoulder: 11,
@@ -71,6 +113,7 @@ export class PoseController {
     this.laneBaseThresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
     this.laneThresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
     this.laneState = 0;
+    this.lastLaneSwitchAt = 0;
     this.laneDecision = "center";
     this.currentJumpOffsetThreshold = JUMP_OFFSET_THRESHOLD;
   }
@@ -219,7 +262,7 @@ export class PoseController {
     const controlScale = this.calibration.scale;
     const bodyScale = this.calibration.bodyScale || controlScale;
     const laneThresholds = this.updateStaticLaneThresholds(sample);
-    const lane = this.resolveHybridLane(sample, laneThresholds);
+    const lane = this.resolveHybridLane(sample, laneThresholds, now);
 
     const leftKneeDrop = (sample.leftLegY - sample.leftHip.y) / bodyScale;
     const rightKneeDrop = (sample.rightLegY - sample.rightHip.y) / bodyScale;
@@ -347,14 +390,30 @@ export class PoseController {
     const previous = this.previousSample;
     if (!previous?.t || !this.calibration) return;
 
+    // Kinematic lead: x_future = x + v*t + 0.5*a*t^2. Velocity is EMA-smoothed
+    // (raw landmark deltas are jittery) and acceleration is its derivative, so
+    // an accelerating step pushes the predicted chest across a lane/jump
+    // boundary before the body actually arrives there -> perceived zero latency.
     const dt = clamp(sample.t - previous.t, 8, 120);
-    const predictionRatio = CONTROL_PREDICTION_MS / dt;
+    const t = CONTROL_PREDICTION_MS;
     const maxOffset = (this.calibration.scale || sample.upperScale || 0.08) * CONTROL_PREDICTION_MAX_SCALE;
-    const offsetX = clamp((sample.rawCenterX - previous.rawCenterX) * predictionRatio, -maxOffset, maxOffset);
-    const offsetY = clamp((sample.rawCenterY - previous.rawCenterY) * predictionRatio, -maxOffset, maxOffset);
 
-    sample.velocityX = (sample.rawCenterX - previous.rawCenterX) / dt;
-    sample.velocityY = (sample.rawCenterY - previous.rawCenterY) / dt;
+    const instVelocityX = (sample.rawCenterX - previous.rawCenterX) / dt;
+    const instVelocityY = (sample.rawCenterY - previous.rawCenterY) / dt;
+    const prevVelocityX = previous.velocityX ?? instVelocityX;
+    const prevVelocityY = previous.velocityY ?? instVelocityY;
+    const velocityX = prevVelocityX + (instVelocityX - prevVelocityX) * VELOCITY_SMOOTHING;
+    const velocityY = prevVelocityY + (instVelocityY - prevVelocityY) * VELOCITY_SMOOTHING;
+    const accelX = (velocityX - prevVelocityX) / dt;
+    const accelY = (velocityY - prevVelocityY) / dt;
+
+    const offsetX = clamp(velocityX * t + 0.5 * accelX * t * t, -maxOffset, maxOffset);
+    const offsetY = clamp(velocityY * t + 0.5 * accelY * t * t, -maxOffset, maxOffset);
+
+    sample.velocityX = velocityX;
+    sample.velocityY = velocityY;
+    sample.accelX = accelX;
+    sample.accelY = accelY;
     sample.predictionOffsetX = offsetX;
     sample.predictionOffsetY = offsetY;
     sample.centerX = clamp(sample.rawCenterX + offsetX, 0, 1);
@@ -372,13 +431,27 @@ export class PoseController {
     if (!previous?.t || !this.calibration) return;
 
     const dt = clamp(sample.t - previous.t, 8, 120);
-    const leftRawVelocity = (sample.leftFootX - previous.leftFootX) / dt;
-    const rightRawVelocity = (sample.rightFootX - previous.rightFootX) / dt;
+    const t = FOOT_PREDICTION_MS;
+
+    // Same kinematic lead as the chest, per foot: smooth velocity, derive
+    // acceleration, extrapolate x + v*t + 0.5*a*t^2. A foot that is still over
+    // center but accelerating sideways predicts into the target lane early.
+    const leftInstVelocity = (sample.leftFootX - previous.leftFootX) / dt;
+    const rightInstVelocity = (sample.rightFootX - previous.rightFootX) / dt;
+    const leftPrevVelocity = previous.leftFootVelocityX ?? leftInstVelocity;
+    const rightPrevVelocity = previous.rightFootVelocityX ?? rightInstVelocity;
+    const leftRawVelocity = leftPrevVelocity + (leftInstVelocity - leftPrevVelocity) * VELOCITY_SMOOTHING;
+    const rightRawVelocity = rightPrevVelocity + (rightInstVelocity - rightPrevVelocity) * VELOCITY_SMOOTHING;
+    const leftAccel = (leftRawVelocity - leftPrevVelocity) / dt;
+    const rightAccel = (rightRawVelocity - rightPrevVelocity) / dt;
+    sample.leftFootVelocityX = leftRawVelocity;
+    sample.rightFootVelocityX = rightRawVelocity;
+
     const leftMappedVelocity = this.mirrorControls ? -leftRawVelocity : leftRawVelocity;
     const rightMappedVelocity = this.mirrorControls ? -rightRawVelocity : rightRawVelocity;
     const maxOffset = (this.calibration.laneScale || this.calibration.scale || sample.laneScale) * FOOT_PREDICTION_MAX_SCALE;
-    const leftOffsetX = clamp(leftRawVelocity * FOOT_PREDICTION_MS, -maxOffset, maxOffset);
-    const rightOffsetX = clamp(rightRawVelocity * FOOT_PREDICTION_MS, -maxOffset, maxOffset);
+    const leftOffsetX = clamp(leftRawVelocity * t + 0.5 * leftAccel * t * t, -maxOffset, maxOffset);
+    const rightOffsetX = clamp(rightRawVelocity * t + 0.5 * rightAccel * t * t, -maxOffset, maxOffset);
     const leftPredictedX = clamp(sample.leftFootX + leftOffsetX, 0, 1);
     const rightPredictedX = clamp(sample.rightFootX + rightOffsetX, 0, 1);
     const strongestVelocity =
@@ -441,7 +514,7 @@ export class PoseController {
     return 0;
   }
 
-  resolveHybridLane(sample, thresholds) {
+  resolveHybridLane(sample, thresholds, now = 0) {
     const currentLane = this.laneState ?? this.lastLane ?? 0;
     const centerRegion = this.getCenterMassLaneRegion(sample, thresholds);
     const leftRegion = this.getLaneRegionForRawX(sample.leftFootPredictedX ?? sample.leftFootX, sample, thresholds);
@@ -503,6 +576,17 @@ export class PoseController {
       decision = centerRegion === 0 ? "center-com" : "center-feet";
     }
 
+    // Anti-jitter dwell: a fresh switch can't be undone (or replaced) for a
+    // brief window, so a single noisy frame can't flip the runner and back.
+    if (nextLane !== currentLane) {
+      if (now - this.lastLaneSwitchAt < LANE_SWITCH_MIN_DWELL_MS) {
+        nextLane = currentLane;
+        decision = "dwell-hold";
+      } else {
+        this.lastLaneSwitchAt = now;
+      }
+    }
+
     this.laneState = nextLane;
     this.laneDecision = decision;
     sample.leftFootPredictedRegion = leftRegion;
@@ -520,8 +604,17 @@ export class PoseController {
   }
 
   updateStaticLaneThresholds(sample = null) {
+    // Foot regions use the fixed ENTER geometry (symmetric).
     this.laneBaseThresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
-    this.laneThresholds = this.laneBaseThresholds;
+
+    // The decision thresholds are hysteretic: whichever side we're already in
+    // relaxes to RETURN, so the runner holds that lane until the body comes
+    // well back toward center. ENTER (0.7) > RETURN (0.4) => no boundary flicker.
+    const lane = this.laneState ?? this.lastLane ?? 0;
+    const thresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
+    if (lane === -1) thresholds.left = -LANE_RETURN_THRESHOLD;
+    else if (lane === 1) thresholds.right = LANE_RETURN_THRESHOLD;
+    this.laneThresholds = thresholds;
 
     if (sample && this.calibration) {
       sample.centerMassRegion = this.getCenterMassLaneRegion(sample, this.laneThresholds);
@@ -546,6 +639,7 @@ export class PoseController {
     this.laneBaseThresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
     this.laneThresholds = { left: -LANE_EXIT_THRESHOLD, right: LANE_EXIT_THRESHOLD };
     this.laneState = 0;
+    this.lastLaneSwitchAt = 0;
     this.laneDecision = "center";
     this.currentJumpOffsetThreshold = JUMP_OFFSET_THRESHOLD;
   }
