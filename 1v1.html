@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DashCam 1v1</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #1a1a2e; display: flex; flex-direction: column; height: 100vh; }
+    
+    .header {
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      padding: 10px;
+      background: #16213e;
+    }
+    .player-label {
+      color: white;
+      font-size: 1.4rem;
+      font-family: Arial, sans-serif;
+      font-weight: bold;
+    }
+    #p1-label { color: #4fc3f7; }
+    #p2-label { color: #ef5350; }
+
+    .games {
+      display: flex;
+      flex: 1;
+      gap: 4px;
+    }
+    .game-wrapper {
+      flex: 1;
+      position: relative;
+      border: 3px solid transparent;
+    }
+    .game-wrapper.p1 { border-color: #4fc3f7; }
+    .game-wrapper.p2 { border-color: #ef5350; }
+
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    /* waiting overlay */
+    .waiting {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 1.2rem;
+      font-family: Arial, sans-serif;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <div class="player-label p1" id="p1-label">🟦 Player 1</div>
+    <div style="color:white; font-size: 1rem; font-family: Arial;">vs</div>
+    <div class="player-label p2" id="p2-label">🟥 Player 2</div>
+  </div>
+
+  <div class="games">
+    <div class="game-wrapper p1">
+      <iframe id="game-p1" src="game.html"></iframe>
+      <div class="waiting" id="wait-p1">Waiting for Player 1...</div>
+    </div>
+    <div class="game-wrapper p2">
+      <iframe id="game-p2" src="game.html"></iframe>
+      <div class="waiting" id="wait-p2">Waiting for Player 2...</div>
+    </div>
+  </div>
+
+  <script>
+    var WS_URL = "ws://localhost:8765"
+    var ws = new WebSocket(WS_URL)
+
+    var connectedPlayers = { p1: false, p2: false }
+
+    ws.onopen = function() {
+      console.log("[1v1] Connected to server")
+    }
+
+    ws.onmessage = function(event) {
+      var data = JSON.parse(event.data)
+
+      // A player controller just connected — hide their waiting overlay
+      if (data.type === "player_connected") {
+        var player = data.player // "p1" or "p2"
+        connectedPlayers[player] = true
+        document.getElementById("wait-" + player).style.display = "none"
+        console.log("[1v1]", player, "connected")
+      }
+
+      // Route input to the correct game iframe
+      if (data.type === "input") {
+        var iframe = data.player === "p1"
+          ? document.getElementById("game-p1")
+          : document.getElementById("game-p2")
+
+        iframe.contentWindow.postMessage({
+          action: data.action,
+          key: data.key
+        }, "*")
+      }
+    }
+
+    ws.onclose = function() {
+      console.warn("[1v1] Lost connection to server")
+    }
+  </script>
+
+</body>
+</html>
