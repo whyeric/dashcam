@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Display (placeholder)</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: #0d1117;
+        color: #e6edf3;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+        padding: 24px;
+        gap: 20px;
+      }
+      h1 { font-size: 18px; font-weight: 600; margin: 0; color: #7d8590; letter-spacing: 0.5px; }
+      .banner {
+        font-size: 13px;
+        color: #d29922;
+        background: #1c1611;
+        border: 1px solid #3a2d12;
+        border-radius: 8px;
+        padding: 10px 14px;
+      }
+      .code-box { text-align: center; padding: 24px 0; }
+      .code-label { font-size: 14px; color: #7d8590; text-transform: uppercase; letter-spacing: 2px; }
+      .code { font-size: 96px; font-weight: 800; letter-spacing: 12px; margin-top: 8px; color: #58a6ff; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+      .cell {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 14px;
+      }
+      .cell .k { font-size: 12px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; }
+      .cell .v { font-size: 32px; font-weight: 700; margin-top: 4px; }
+      .on { color: #3fb950; }
+      .off { color: #6e7681; }
+      .pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #30363d; }
+      .pill.connected { color: #3fb950; border-color: #2ea04326; background: #2ea04318; }
+      .pill.disconnected { color: #f85149; border-color: #f8514926; background: #f8514918; }
+      #events {
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 12px;
+        height: 180px;
+        overflow-y: auto;
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .ev-jump { color: #58a6ff; }
+      .ev-duck { color: #d2a8ff; }
+      footer { margin-top: auto; font-size: 12px; color: #6e7681; }
+    </style>
+  </head>
+  <body>
+    <h1>SUBWAY-STYLE RUNNER · DISPLAY (placeholder)</h1>
+    <div class="banner">
+      This is NOT the game renderer — it just proves the transport. A teammate replaces this page with the
+      real canvas, which reads the same <code>input:state</code> / <code>input:event</code> contract.
+    </div>
+
+    <div class="code-box">
+      <div class="code-label">Pairing code — type this on the phone</div>
+      <div class="code" id="code">····</div>
+      <div style="margin-top: 12px">
+        phone: <span id="phone" class="pill disconnected">disconnected</span>
+        · socket: <span id="socket" class="pill disconnected">connecting…</span>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="cell"><div class="k">Running</div><div class="v off" id="running">no</div></div>
+      <div class="cell"><div class="k">Intensity</div><div class="v" id="intensity">0.00</div></div>
+      <div class="cell"><div class="k">Lane</div><div class="v" id="lane">center</div></div>
+      <div class="cell"><div class="k">Plank / jetpack</div><div class="v off" id="plank">off</div></div>
+    </div>
+
+    <div>
+      <div class="cell" style="border: none; padding: 0 0 8px; background: none">
+        <div class="k">Discrete events (jump / duck)</div>
+      </div>
+      <div id="events"></div>
+    </div>
+
+    <footer id="status">connecting…</footer>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const LANE_NAMES = { "-1": "left", 0: "center", 1: "right" };
+
+      const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+      let ws;
+
+      function connect() {
+        ws = new WebSocket(wsUrl);
+
+        ws.addEventListener("open", () => {
+          setPill("socket", true, "open");
+          $("status").textContent = "connected — creating session…";
+          send("display:create_session", {});
+        });
+
+        ws.addEventListener("close", () => {
+          setPill("socket", false, "closed");
+          setPill("phone", false, "disconnected");
+          $("status").textContent = "socket closed — reconnecting in 1s…";
+          setTimeout(connect, 1000);
+        });
+
+        ws.addEventListener("error", () => {
+          $("status").textContent = "socket error";
+        });
+
+        ws.addEventListener("message", (e) => {
+          let msg;
+          try { msg = JSON.parse(e.data); } catch { return; }
+          handle(msg);
+        });
+      }
+
+      function send(type, data) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type, data, t: Date.now() }));
+        }
+      }
+
+      function handle(msg) {
+        switch (msg.type) {
+          case "session:created":
+            $("code").textContent = msg.data.sessionCode;
+            $("status").textContent = "session " + msg.data.sessionCode + " — waiting for phone…";
+            break;
+          case "phone:status":
+            setPill("phone", msg.data.connected, msg.data.connected ? "connected" : "disconnected");
+            $("status").textContent = msg.data.connected ? "phone paired ✓" : "phone left — runner will stop";
+            break;
+          case "input:state":
+            renderState(msg.data);
+            break;
+          case "input:event":
+            logEvent(msg.data);
+            break;
+          case "error":
+            $("status").textContent = "error: " + msg.data.code + " — " + msg.data.message;
+            break;
+          case "pong":
+            break;
+        }
+      }
+
+      function renderState(s) {
+        const running = $("running");
+        running.textContent = s.running ? "yes" : "no";
+        running.className = "v " + (s.running ? "on" : "off");
+
+        $("intensity").textContent = Number(s.intensity).toFixed(2);
+
+        $("lane").textContent = LANE_NAMES[String(s.lane)] ?? s.lane;
+
+        const plank = $("plank");
+        plank.textContent = s.plank ? "ON" : "off";
+        plank.className = "v " + (s.plank ? "on" : "off");
+      }
+
+      function logEvent(ev) {
+        const el = document.createElement("div");
+        const time = new Date().toLocaleTimeString();
+        el.className = ev.type === "jump" ? "ev-jump" : "ev-duck";
+        el.textContent = `[${time}] ${ev.type.toUpperCase()}  (serverT=${Math.round(ev.serverT)})`;
+        const box = $("events");
+        box.prepend(el);
+        while (box.childElementCount > 50) box.removeChild(box.lastChild);
+      }
+
+      function setPill(id, ok, label) {
+        const el = $(id);
+        el.textContent = label;
+        el.className = "pill " + (ok ? "connected" : "disconnected");
+      }
+
+      connect();
+    </script>
+  </body>
+</html>

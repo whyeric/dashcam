@@ -1,0 +1,26 @@
+{
+  "name": "dashcam-ws-transport",
+  "version": "0.1.0",
+  "description": "WebSocket transport layer for an exercise-controlled Subway Surfers clone (phone controller + display renderer + Node server).",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "cross-env LOG_PRETTY=1 node server/index.js",
+    "fake:phone": "node server/scripts/fakePhone.js",
+    "fake:display": "node server/scripts/fakeDisplay.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "pino": "9.5.0",
+    "ws": "8.18.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "chalk": "5.3.0",
+    "cross-env": "7.0.3",
+    "pino-pretty": "13.0.0"
+  }
+}
