@@ -10,7 +10,7 @@
   "asmFrameworkUrl": "SanFrancisco.asm.framework.unityweb",
   "TOTAL_MEMORY": 369098752,
   "graphicsAPI": ["WebGL 2.0","WebGL 1.0"],
-  "webglContextAttributes": {"preserveDrawingBuffer": false},
+  "webglContextAttributes": {"preserveDrawingBuffer": true},
   "splashScreenStyle": "Dark",
   "backgroundColor": "#231F20",
   "developmentBuild": false,
