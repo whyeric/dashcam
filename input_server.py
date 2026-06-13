@@ -14,27 +14,38 @@ VALID_KEYS = {
 
 
 async def handler(websocket):
-    # Assign player slot on connect
-    connected_players = [v["player"] for v in clients.values()]
+    # Check if this is the game screen connecting first
+    # Game screen sends {"type": "register", "role": "screen"} on connect
+    # Controllers get auto-assigned p1/p2
     
-    if "p1" not in connected_players:
-        player = "p1"
-    elif "p2" not in connected_players:
-        player = "p2"
+    first_msg = await websocket.recv()
+    try:
+        data = json.loads(first_msg)
+        role = data.get("role", "controller")
+    except:
+        role = "controller"
+
+    if role == "screen":
+        clients[websocket] = {"player": "screen"}
+        print(f"[server] Game screen connected.")
     else:
-        player = "spectator"
+        connected_players = [v["player"] for v in clients.values()]
+        if "p1" not in connected_players:
+            player = "p1"
+        elif "p2" not in connected_players:
+            player = "p2"
+        else:
+            player = "spectator"
 
-    clients[websocket] = {"player": player}
-    
-    # Tell the client who they are
-    await websocket.send(json.dumps({"type": "assign", "player": player}))
-    print(f"[server] {player} connected. {len(clients)} client(s) total.")
+        clients[websocket] = {"player": player}
+        await websocket.send(json.dumps({"type": "assign", "player": player}))
 
-    # after assigning player slot and sending "assign":
-    payload = json.dumps({"type": "player_connected", "player": player})
-    for client in clients:
-        if client != websocket:
-            await client.send(payload)
+        payload = json.dumps({"type": "player_connected", "player": player})
+        for client in clients:
+            if client != websocket:
+                await client.send(payload)
+
+        print(f"[server] {player} connected. {len(clients)} client(s) total.")
     try:
         async for message in websocket:
             try:

@@ -109,8 +109,9 @@
       }
     }
 
-    ws.onclose = function() {
-      console.warn("[1v1] Lost connection to server")
+    ws.onopen = function() {
+        console.log("[1v1] Connected to server")
+        ws.send(JSON.stringify({ type: "register", role: "screen" }))  // ADD THIS
     }
   </script>
 

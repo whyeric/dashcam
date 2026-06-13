@@ -33,24 +33,18 @@
     <script src="loader.js"></script>
     <script>
       (function () {
-        // ── Key mapping: controller command → Unity key code ──────────────
-        // Subway Surfers uses standard arrow keys / WASD + Space for jump.
-        // Add or modify entries here to match your controller's protocol.
         var KEY_MAP = {
-          left:      37,
-          up:        38,
-          right:     39,
-          down:      40,
-          space:     32,
-          jump:      32,
-          a:         65,
-          d:         68,
-          w:         87,
-          s:         83,
+          left:  37,
+          up:    38,
+          right: 39,
+          down:  40,
+          space: 32,
+          jump:  32,
+          a:     65,
+          d:     68,
+          w:     87,
+          s:     83,
         };
-
-        var WS_URL       = "ws://localhost:8765";
-        var RECONNECT_MS = 3000;
 
         function getCanvas() {
           return document.querySelector("#game canvas")
@@ -63,12 +57,11 @@
 
           var keyCode = KEY_MAP[keyName];
           if (keyCode === undefined) {
-            console.warn("[input-bridge] Unknown key:", keyName);
+            console.warn("[game] Unknown key:", keyName);
             return;
           }
 
           var code = "Key" + String.fromCharCode(keyCode).toUpperCase();
-
           canvas.dispatchEvent(new KeyboardEvent(type, {
             keyCode:    keyCode,
             which:      keyCode,
@@ -79,56 +72,14 @@
           }));
         }
 
-        function connect() { // TODO: client to be changed
-          var ws = new WebSocket(WS_URL);
+        // Only listen for postMessage from 1v1.html — no WebSocket here
+        window.addEventListener("message", function(event) {
+          var msg = event.data;
+          if (!msg || !msg.key) return;
+          if (msg.action === "press")   dispatchKey(msg.key, "keydown");
+          if (msg.action === "release") dispatchKey(msg.key, "keyup");
+        });
 
-          ws.onopen = function () {
-            console.log("[input-bridge] Connected to", WS_URL);
-          };
-
-          ws.onmessage = function (event) {
-            try {
-              var msg = JSON.parse(event.data);
-              if (msg.action === "press")   dispatchKey(msg.key, "keydown");
-              if (msg.action === "release") dispatchKey(msg.key, "keyup");
-            } catch (e) {
-              // might be better to treat as a raw string in key press
-              var raw = event.data.trim().toLowerCase();
-              if (KEY_MAP[raw]) dispatchKey(raw, "keydown");
-            }
-          };
-
-          ws.onclose = function () {
-            console.warn("[input-bridge] Disconnected. Reconnecting in", RECONNECT_MS, "ms");
-            setTimeout(connect, RECONNECT_MS);
-          };
-
-          ws.onerror = function () {
-            ws.close(); 
-          };
-        }
-
-        function waitForCanvas() {
-          var canvas = getCanvas();
-          if (canvas && window.unityGame) {
-            connect();
-          } else {
-            setTimeout(waitForCanvas, 100); // sketchy as hell
-          }
-        }
-
-        // also listen for the Unity runtime init event
-        if (window.unityGame && window.unityGame.Module) {
-            // in game.html — replace the connect() function with this:
-            window.addEventListener("message", function(event) {
-            var msg = event.data
-            if (!msg || !msg.key) return
-            if (msg.action === "press")   dispatchKey(msg.key, "keydown")
-            if (msg.action === "release") dispatchKey(msg.key, "keyup")
-            })
-        } else {
-          waitForCanvas();
-        }
       })();
     </script>
   </body>

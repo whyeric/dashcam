@@ -253,6 +253,7 @@
                     isConnecting = false;
                     updateStatus(true);
                     addLog('Connected successfully');
+                    ws.send(JSON.stringify({ type: "register", role: "controller" }));
                 };
 
                 ws.onmessage = function(event) {
