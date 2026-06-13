@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72, #2a5298);
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .status {
+            margin-bottom: 20px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            background: rgba(255,255,255,0.1);
+        }
+
+        .status.connected {
+            background: rgba(76, 175, 80, 0.3);
+            border: 2px solid #4CAF50;
+        }
+
+        .status.disconnected {
+            background: rgba(244, 67, 54, 0.3);
+            border: 2px solid #F44336;
+        }
+
+        .controller {
+            display: flex;
+            gap: 60px;
+            align-items: center;
+            margin-top: 30px;
+        }
+
+        .d-pad {
+            display: grid;
+            grid-template-columns: repeat(3, 80px);
+            grid-template-rows: repeat(3, 80px);
+            gap: 5px;
+        }
+
+        .action-buttons {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .btn {
+            border: none;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.1s ease;
+            user-select: none;
+            -webkit-user-select: none;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+        }
+
+        .btn:active {
+            transform: scale(0.95);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .btn-direction {
+            background: linear-gradient(145deg, #3498db, #2980b9);
+            color: white;
+            width: 80px;
+            height: 80px;
+            font-size: 32px;
+        }
+
+        .btn-direction:hover {
+            background: linear-gradient(145deg, #5dade2, #3498db);
+        }
+
+        .btn-action {
+            background: linear-gradient(145deg, #e74c3c, #c0392b);
+            color: white;
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            font-size: 16px;
+        }
+
+        .btn-action:hover {
+            background: linear-gradient(145deg, #ff6b6b, #e74c3c);
+        }
+
+        .btn-empty {
+            background: transparent;
+            box-shadow: none;
+            cursor: default;
+        }
+
+        .logs {
+            margin-top: 30px;
+            width: 100%;
+            max-width: 600px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            padding: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .logs h3 {
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #aaa;
+        }
+
+        .log-entry {
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+
+        .server-config {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .server-config input {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: none;
+            font-size: 14px;
+            width: 200px;
+        }
+
+        .server-config button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        .server-config button:hover {
+            background: #45a049;
+        }
+
+        .server-config button.disconnect {
+            background: #f44336;
+        }
+
+        .server-config button.disconnect:hover {
+            background: #da190b;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎮 Subway Surfers Controller</h1>
+    <div id="status" class="status disconnected">Disconnected</div>
+
+    <div class="server-config">
+        <input type="text" id="wsUrl" value="ws://localhost:8765" placeholder="WebSocket URL">
+        <button onclick="connect()">Connect</button>
+        <button class="disconnect" onclick="disconnect()">Disconnect</button>
+    </div>
+
+    <div class="controller">
+        <div class="d-pad">
+            <div class="btn btn-empty"></div>
+            <button class="btn btn-direction" data-key="up" onmousedown="sendKey('up')" onmouseup="releaseKey('up')" ontouchstart="sendKey('up')" ontouchend="releaseKey('up')">▲</button>
+            <div class="btn btn-empty"></div>
+            <button class="btn btn-direction" data-key="left" onmousedown="sendKey('left')" onmouseup="releaseKey('left')" ontouchstart="sendKey('left')" ontouchend="releaseKey('left')">◀</button>
+            <div class="btn btn-empty"></div>
+            <button class="btn btn-direction" data-key="right" onmousedown="sendKey('right')" onmouseup="releaseKey('right')" ontouchstart="sendKey('right')" ontouchend="releaseKey('right')">▶</button>
+            <div class="btn btn-empty"></div>
+            <button class="btn btn-direction" data-key="down" onmousedown="sendKey('down')" onmouseup="releaseKey('down')" ontouchstart="sendKey('down')" ontouchend="releaseKey('down')">▼</button>
+            <div class="btn btn-empty"></div>
+        </div>
+
+        <div class="action-buttons">
+            <button class="btn btn-action" data-key="space" onmousedown="sendKey('space')" onmouseup="releaseKey('space')" ontouchstart="sendKey('space')" ontouchend="releaseKey('space')">JUMP</button>
+            <button class="btn btn-action" data-key="down" onmousedown="sendKey('down')" onmouseup="releaseKey('down')" ontouchstart="sendKey('down')" ontouchend="releaseKey('down')" style="background: linear-gradient(145deg, #9b59b6, #8e44ad);">ROLL</button>
+        </div>
+    </div>
+
+    <div class="logs">
+        <h3>Input Log</h3>
+        <div id="logEntries"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let isConnecting = false;
+
+        function addLog(message, type = 'info') {
+            const logEntries = document.getElementById('logEntries');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logEntries.insertBefore(entry, logEntries.firstChild);
+
+            while (logEntries.children.length > 50) {
+                logEntries.removeChild(logEntries.lastChild);
+            }
+        }
+
+        function updateStatus(connected) {
+            const status = document.getElementById('status');
+            if (connected) {
+                status.textContent = 'Connected to server';
+                status.className = 'status connected';
+            } else {
+                status.textContent = 'Disconnected';
+                status.className = 'status disconnected';
+            }
+        }
+
+        function connect() {
+            if (isConnecting || (ws && ws.readyState === WebSocket.OPEN)) return;
+
+            const url = document.getElementById('wsUrl').value;
+            isConnecting = true;
+            addLog('Connecting to ' + url + '...');
+
+            try {
+                ws = new WebSocket(url);
+
+                ws.onopen = function() {
+                    isConnecting = false;
+                    updateStatus(true);
+                    addLog('Connected successfully');
+                };
+
+                ws.onmessage = function(event) {
+                    addLog('Received: ' + event.data);
+                };
+
+                ws.onclose = function() {
+                    isConnecting = false;
+                    updateStatus(false);
+                    addLog('Connection closed');
+                    ws = null;
+                };
+
+                ws.onerror = function(error) {
+                    isConnecting = false;
+                    updateStatus(false);
+                    addLog('Connection error');
+                    ws = null;
+                };
+            } catch (e) {
+                isConnecting = false;
+                updateStatus(false);
+                addLog('Error: ' + e.message);
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+                addLog('Disconnected manually');
+            }
+        }
+
+        function sendKey(key) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Cannot send: Not connected');
+                return;
+            }
+
+            const message = JSON.stringify({ action: 'press', key: key });
+            ws.send(message);
+            addLog('Sent: ' + message);
+        }
+
+        function releaseKey(key) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            const message = JSON.stringify({ action: 'release', key: key });
+            ws.send(message);
+        }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.repeat) return;
+
+            const keyMap = {
+                'ArrowUp': 'up',
+                'ArrowDown': 'down',
+                'ArrowLeft': 'left',
+                'ArrowRight': 'right',
+                ' ': 'space',
+                'w': 'up',
+                'a': 'left',
+                's': 'down',
+                'd': 'right'
+            };
+
+            if (keyMap[e.key]) {
+                e.preventDefault();
+                sendKey(keyMap[e.key]);
+
+                const btn = document.querySelector('[data-key="' + keyMap[e.key] + '"]');
+                if (btn) {
+                    btn.style.transform = 'scale(0.95)';
+                }
+            }
+        });
+
+        document.addEventListener('keyup', function(e) {
+            const keyMap = {
+                'ArrowUp': 'up',
+                'ArrowDown': 'down',
+                'ArrowLeft': 'left',
+                'ArrowRight': 'right',
+                ' ': 'space',
+                'w': 'up',
+                'a': 'left',
+                's': 'down',
+                'd': 'right'
+            };
+
+            if (keyMap[e.key]) {
+                e.preventDefault();
+                releaseKey(keyMap[e.key]);
+
+                const btn = document.querySelector('[data-key="' + keyMap[e.key] + '"]');
+                if (btn) {
+                    btn.style.transform = '';
+                }
+            }
+        });
+
+        window.addEventListener('load', function() {
+            connect();
+        });
+    </script>
+</body>
+</html>
