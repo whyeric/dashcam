@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "solo": "concurrently \"python3 -m http.server 8000\" \"open-cli http://localhost:8000\"",
-    "1v1": "concurrently \"python3 input_server.py\" \"python3 -m http.server 8000\" \"open-cli http://localhost:8000/1v1.html\""
+    "solo": "concurrently \"python3 -m http.server 8000 --bind 0.0.0.0\" \"open-cli http://localhost:8000\"",
+    "1v1": "concurrently \"python3 input_server.py\" \"python3 -m http.server 8000 --bind 0.0.0.0\" \"open-cli http://localhost:8000/1v1.html\""
   }
 }
