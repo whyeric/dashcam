@@ -96,9 +96,9 @@
   <script>
     // ---- config -----------------------------------------------------------
     // The page is served from the computer on :8000; the relay is on :8765.
-    var WS_HOST = location.hostname || "localhost";
-    var WS_PORT = 8765;
-    var WS_URL = "ws://" + WS_HOST + ":" + WS_PORT;
+    var WS_URL = location.hostname === "localhost"
+    ? "ws://localhost:8000"
+    : "wss://dashcam-production.up.railway.app"
     var RECONNECT_MS = 1500;
 
     // LEFT/RIGHT = lane change, JUMP = up arrow, ROLL = down arrow.

@@ -1,6 +1,14 @@
 {
+  "type": "module",
   "scripts": {
-    "solo": "concurrently \"python3 -m http.server 8000\" \"open-cli http://localhost:8000\"",
-    "1v1": "concurrently \"python3 input_server.py\" \"python3 -m http.server 8000\" \"open-cli http://localhost:8000/1v1.html\""
+    "start": "node server/index.js",
+    "solo": "concurrently \"node server/index.js\" \"open-cli http://localhost:8000\"",
+    "1v1": "concurrently \"node server/index.js\" \"open-cli http://localhost:8000/1v1.html\""
+  },
+  "dependencies": {
+    "concurrently": "^9.0.0",
+    "express": "^4.22.2",
+    "open-cli": "^9.0.0",
+    "ws": "^8.21.0"
   }
 }

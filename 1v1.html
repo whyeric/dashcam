@@ -78,7 +78,9 @@
   <script>
     // Relay runs on :8765 of whatever host served this page (so it also works
     // if the screen is opened from another machine on the LAN).
-    var WS_URL = "ws://" + (location.hostname || "localhost") + ":8765"
+    var WS_URL = location.hostname === "localhost"
+    ? "ws://localhost:8000"
+    : "wss://dashcam-production.up.railway.app" 
     var connectedPlayers = { p1: false, p2: false }
     var ws
 
