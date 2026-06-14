@@ -160,6 +160,18 @@ class Config:
     land_refractory: float = 0.250        # suppress intent this long after airborne
     duck_ratio: float = 0.70              # torso height < ratio*calibrated => ducking
 
+    # Vertical gesture (jump / crouch) detection. All offsets/velocities are in
+    # torso-lengths from the calibrated neutral chest height. Image-y increases
+    # DOWNWARD, so a jump is a NEGATIVE offset/velocity and a crouch is POSITIVE.
+    jump_offset: float = -0.15            # chest this far up (torso-lengths) => jump
+    jump_vel: float = -0.85               # ...with at least this much upward speed (torso/s)
+    duck_offset: float = 0.35             # chest this far down => crouch
+    duck_vel: float = 0.75                # ...with at least this much downward speed (torso/s)
+    duck_hold_time: float = 0.06          # or just held below duck_offset this long (slow squat)
+    gesture_cooldown: float = 0.25        # min gap between emitted gestures
+    jump_rearm_offset: float = -0.12      # offset must rise above this to re-arm jump
+    duck_rearm_offset: float = 0.16       # offset must fall below this to re-arm crouch
+
     # Resting-position adaptation.
     rest_ema_alpha: float = 0.05
 
@@ -289,6 +301,7 @@ class Calibration:
     neutral_hip: float                    # hip-center lat-x at center
     step_distance: float                  # typical lateral step (lat-x)
     torso_height: float                   # |hip_y - shoulder_y| standing tall
+    neutral_body_y: float                 # chest control-point image-y standing neutral
     vel_threshold: float
     disp_threshold: float
 
@@ -312,6 +325,9 @@ class Calibration:
             neutral_hip=float(d["neutral_hip"]),
             step_distance=float(d["step_distance"]),
             torso_height=float(d["torso_height"]),
+            # Backwards-compatible: older calibration files predate vertical
+            # gestures. Fall back to a sensible standing chest height.
+            neutral_body_y=float(d.get("neutral_body_y", 0.42)),
             vel_threshold=float(d["vel_threshold"]),
             disp_threshold=float(d["disp_threshold"]),
         )
@@ -334,6 +350,8 @@ class Calibration:
             # uncalibrated normal stance never reads as a duck (only a real,
             # deep crouch does). Calibration replaces this with a measurement.
             torso_height=0.18,
+            # Neutral chest height for vertical gestures; replaced by calibration.
+            neutral_body_y=0.42,
             vel_threshold=cfg.vel_threshold,
             disp_threshold=cfg.disp_threshold,
         )
@@ -369,12 +387,14 @@ class Calibrator:
         return self.ORDER[self.phase_idx]
 
     def add(self, features: "Features") -> None:
-        """Record one sample for the current phase (body_x, hips, ankles, torso)."""
+        """Record one sample for the current phase (body_x, hips, ankles, torso,
+        chest-y)."""
         if self.phase is CalibrationPhase.DONE or not features.has_lower_body:
             return
         self._samples[self.phase].append((
             features.body_x, features.hip_x,
             features.left.x, features.right.x, features.torso_height,
+            features.body_y,
         ))
 
     def next_phase(self) -> bool:
@@ -407,6 +427,7 @@ class Calibrator:
             "right": self._mean(center_rows, 3),
         }
         torso = self._mean(center_rows, 4)
+        neutral_body_y = self._mean(center_rows, 5)
 
         # Thresholds derived from the player's real step size. Commit once the foot
         # has displaced ~22% of a full step, and treat "fast" as covering a step in
@@ -423,6 +444,7 @@ class Calibrator:
             neutral_hip=center_x,
             step_distance=step,
             torso_height=torso if torso > 0 else 0.30,
+            neutral_body_y=neutral_body_y if neutral_body_y > 0 else 0.42,
             vel_threshold=vel_threshold,
             disp_threshold=disp_threshold,
         )
@@ -457,6 +479,12 @@ class Features:
     body_conf: float
     torso_height: float
     has_lower_body: bool
+    # vertical (jump / crouch) signals -- image-y, down = +
+    hip_y: float = 0.0            # hip-midpoint image-y (raw)
+    shoulder_y: float = 0.0      # shoulder-midpoint image-y (raw)
+    body_y: float = 0.0          # chest control point (0.65*shoulder + 0.35*hip), filtered
+    body_vy: float = 0.0         # chest vertical velocity (height/s, + = down)
+    body_y_conf: float = 0.0     # confidence backing body_y (0 => untrusted)
 
 
 class FeatureExtractor:
@@ -479,6 +507,8 @@ class FeatureExtractor:
         self._hip_vx = self._mk_vel()
         self._hip_vy = self._mk_vel()
         self._body_x = EmaFilter(cfg.body_ema_alpha)
+        self._body_y = EmaFilter(cfg.body_ema_alpha)   # chest height: smoothed for offset
+        self._body_vy = self._mk_vel()                 # chest height: raw for low-lag velocity
 
     def _make_foot_filter(self):
         if self.cfg.use_oneeuro_for_feet:
@@ -550,13 +580,22 @@ class FeatureExtractor:
 
         hip_x, hip_conf, hip_y_raw = self._midpoint(lm, "hip", gate, bbox)
         body_x = self._body_x_value(lm, gate, hip_x, bbox)
-        shoulder_x, _, shoulder_y_raw = self._midpoint(lm, "shoulder", gate, bbox)
+        shoulder_x, shoulder_conf, shoulder_y_raw = self._midpoint(lm, "shoulder", gate, bbox)
 
         hip_xf = self._hip_x(hip_x)            # smoothed: used for lane confirmation
         self._hip_vx.add(t, hip_x)             # raw: low-lag hip velocity (support signal)
         torso_height = abs(hip_y_raw - shoulder_y_raw) if (hip_y_raw is not None and shoulder_y_raw is not None) else 0.0
         if hip_y_raw is not None:
             self._hip_vy.add(t, hip_y_raw)
+
+        # Chest control point for vertical (jump / crouch) gestures.
+        body_y_raw, body_y_conf = self._body_y_value(hip_y_raw, hip_conf, shoulder_y_raw, shoulder_conf, gate)
+        if body_y_raw is not None:
+            body_yf = self._body_y(body_y_raw)   # smoothed: offset / threshold crossing
+            self._body_vy.add(t, body_y_raw)     # raw: low-lag vertical velocity
+            body_vy = self._body_vy.velocity()
+        else:
+            body_yf, body_vy = 0.0, 0.0          # untrusted frame: conf 0 => detector ignores
 
         body_xf = self._body_x(body_x)
         has_lower = feet["left"].source != "none" or feet["right"].source != "none" or hip_conf >= gate
@@ -570,6 +609,9 @@ class FeatureExtractor:
             body_x=body_xf, body_conf=hip_conf,
             torso_height=torso_height,
             has_lower_body=has_lower,
+            hip_y=hip_y_raw if hip_y_raw is not None else 0.0,
+            shoulder_y=shoulder_y_raw if shoulder_y_raw is not None else 0.0,
+            body_y=body_yf, body_vy=body_vy, body_y_conf=body_y_conf,
         )
 
     def _midpoint(self, lm, joint, gate, bbox):
@@ -601,6 +643,152 @@ class FeatureExtractor:
         if bbox is not None:
             return self.cfg.lat(bbox[0])
         return hip_x
+
+    def _body_y_value(self, hip_y, hip_conf, sh_y, sh_conf, gate):
+        """Chest control-point image-y: 0.65*shoulder + 0.35*hip when both are
+        confident, else the available upper-body point. Returns ``(y, conf)`` with
+        conf 0 (and y None) when neither shoulder nor hip is trustworthy."""
+        have_sh = sh_conf >= gate and sh_y is not None
+        have_hip = hip_conf >= gate and hip_y is not None
+        if have_sh and have_hip:
+            return 0.65 * sh_y + 0.35 * hip_y, min(sh_conf, hip_conf)
+        if have_sh:
+            return sh_y, sh_conf
+        if have_hip:
+            return hip_y, hip_conf
+        return None, 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Vertical gesture (jump / crouch) detection
+# --------------------------------------------------------------------------- #
+@dataclass
+class GestureDecision:
+    """Result of one VerticalGestureDetector update (returned every frame)."""
+    jump: bool                      # one-shot: True on the frame a jump fires
+    duck: bool                      # one-shot: True on the frame a crouch fires
+    vertical_offset: float          # chest offset from neutral, torso-lengths (+ = down)
+    vertical_velocity: float        # chest vertical velocity, torso/s (+ = down)
+    jump_armed: bool                # ready to fire a new jump
+    duck_armed: bool                # ready to fire a new crouch
+    reason: str                     # short human label for debugging
+    active: Optional[str] = None    # gesture to *display* now: "jump"/"duck", held for the
+                                    # cooldown window after it fired, else None
+    cooldown_remaining: float = 0.0  # seconds left in the cooldown (0 once elapsed)
+
+
+def vertical_chest_signal(cfg: "Config", calib: "Calibration", f: "Features"):
+    """(offset, velocity) of the chest from the calibrated neutral height, both in
+    torso-lengths (image-y down = +, so up/jump is negative). Returns ``(0.0, 0.0)``
+    when the upper body is not trustworthy this frame so callers treat it as quiet."""
+    if f.body_y_conf < cfg.landmark_conf_min:
+        return 0.0, 0.0
+    th = max(calib.torso_height, 0.12)
+    return (f.body_y - calib.neutral_body_y) / th, f.body_vy / th
+
+
+def vertical_gesture_active(cfg: "Config", calib: "Calibration", f: "Features") -> bool:
+    """True while a jump or crouch is in progress, used to suppress lane changes so
+    side movement is ignored during the vertical gesture window. Spans the whole arc
+    of a gesture: fast vertical velocity (onset) or the chest still displaced past
+    the re-arm bands (held), so a sidestep mid-gesture can't slip a lane through."""
+    offset, vel = vertical_chest_signal(cfg, calib, f)
+    return (offset <= cfg.jump_rearm_offset or offset >= cfg.duck_rearm_offset
+            or vel <= cfg.jump_vel or vel >= cfg.duck_vel)
+
+
+class VerticalGestureDetector:
+    """Detects one-shot jump / crouch gestures from the chest control point.
+
+    Pure logic (no IO): feed the same ``Features`` the lane controllers use plus a
+    timestamp. A jump fires on a fast upward chest displacement; a crouch fires on a
+    fast downward one OR simply holding low (a slow squat). Each gesture fires once
+    and must re-arm (chest back near neutral) before firing again; a shared cooldown
+    stops jump/crouch bouncing. Jump and crouch are mutually exclusive in a frame —
+    the sign of the vertical offset picks which one is even eligible.
+    """
+
+    def __init__(self, cfg: "Config", calib: "Calibration"):
+        self.cfg = cfg
+        self.calib = calib
+        self._jump_armed = True
+        self._duck_armed = True
+        self._last_fire_t = -1e9
+        self._last_gesture: Optional[str] = None     # which gesture last fired (for the indicator)
+        self._duck_hold_since: Optional[float] = None
+
+    def reset(self) -> None:
+        self._jump_armed = True
+        self._duck_armed = True
+        self._last_fire_t = -1e9
+        self._last_gesture = None
+        self._duck_hold_since = None
+
+    def _display_state(self, now: float):
+        """(active_gesture, cooldown_remaining) for the on-screen indicator: the
+        last-fired gesture is 'held' for the whole cooldown window, then clears."""
+        remaining = self.cfg.gesture_cooldown - (now - self._last_fire_t)
+        if remaining > 0.0 and self._last_gesture is not None:
+            return self._last_gesture, remaining
+        return None, 0.0
+
+    def update(self, f: "Features", now: float) -> GestureDecision:
+        cfg = self.cfg
+        offset, vel = vertical_chest_signal(cfg, self.calib, f)
+
+        if f.body_y_conf < cfg.landmark_conf_min:
+            # Upper body untrusted: emit nothing, keep arm state, reset hold timer.
+            self._duck_hold_since = None
+            active, cd = self._display_state(now)
+            return GestureDecision(False, False, 0.0, 0.0,
+                                   self._jump_armed, self._duck_armed, "no-body",
+                                   active, cd)
+
+        # Re-arm each gesture once the chest has returned toward neutral.
+        if offset > cfg.jump_rearm_offset:
+            self._jump_armed = True
+        if offset < cfg.duck_rearm_offset:
+            self._duck_armed = True
+
+        # Track how long the chest has been held below the crouch line (slow squat).
+        if offset >= cfg.duck_offset:
+            if self._duck_hold_since is None:
+                self._duck_hold_since = now
+        else:
+            self._duck_hold_since = None
+
+        jump = duck = False
+        reason = "neutral"
+        if (now - self._last_fire_t) < cfg.gesture_cooldown:
+            reason = "cooldown"
+        elif offset <= cfg.jump_offset:                       # eligible for a jump
+            if self._jump_armed and vel <= cfg.jump_vel:
+                jump = True
+            else:
+                reason = "jump-wait" if self._jump_armed else "jump-spent"
+        elif offset >= cfg.duck_offset:                       # eligible for a crouch
+            held = (self._duck_hold_since is not None and
+                    now - self._duck_hold_since >= cfg.duck_hold_time)
+            if self._duck_armed and (vel >= cfg.duck_vel or held):
+                duck = True
+            else:
+                reason = "duck-wait" if self._duck_armed else "duck-spent"
+
+        if jump:
+            self._jump_armed = False
+            self._last_fire_t = now
+            self._last_gesture = "jump"
+            reason = "jump"
+        elif duck:
+            self._duck_armed = False
+            self._last_fire_t = now
+            self._last_gesture = "duck"
+            reason = "duck"
+
+        active, cd = self._display_state(now)
+        return GestureDecision(jump, duck, offset, vel,
+                               self._jump_armed, self._duck_armed, reason,
+                               active, cd)
 
 
 # --------------------------------------------------------------------------- #
@@ -693,7 +881,9 @@ class LaneStateMachine:
             self._airborne_until = now + cfg.land_refractory
         ducking = (self.calib.torso_height > 0 and f.torso_height > 0 and
                    f.torso_height < cfg.duck_ratio * self.calib.torso_height)
-        return now < self._airborne_until or ducking
+        # Also ignore side movement while a vertical jump/crouch gesture is underway.
+        return (now < self._airborne_until or ducking
+                or vertical_gesture_active(cfg, self.calib, f))
 
     def _lead_foot(self, f: Features):
         """Foot with the strongest *reliable* horizontal speed (direction by
@@ -962,7 +1152,9 @@ class HybridLaneController:
             self._airborne_until = now + cfg.land_refractory
         ducking = (self.calib.torso_height > 0 and f.torso_height > 0 and
                    f.torso_height < cfg.duck_ratio * self.calib.torso_height)
-        return now < self._airborne_until or ducking
+        # Also ignore side movement while a vertical jump/crouch gesture is underway.
+        return (now < self._airborne_until or ducking
+                or vertical_gesture_active(cfg, self.calib, f))
 
     def _region(self, x: float) -> int:
         b0, b1 = self.calib.boundaries
@@ -1660,7 +1852,9 @@ class PositionLaneController:
             self._airborne_until = now + cfg.land_refractory
         ducking = (self.calib.torso_height > 0 and f.torso_height > 0 and
                    f.torso_height < cfg.duck_ratio * self.calib.torso_height)
-        return now < self._airborne_until or ducking
+        # Also ignore side movement while a vertical jump/crouch gesture is underway.
+        return (now < self._airborne_until or ducking
+                or vertical_gesture_active(cfg, self.calib, f))
 
     def _target_lane(self, bx: float) -> int:
         """Nearest lane for body-x ``bx`` with hysteresis around the current lane.

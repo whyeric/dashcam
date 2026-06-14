@@ -56,7 +56,8 @@ import numpy as np
 
 from lane_engine import (
     Config, Calibration, Calibrator, CalibrationPhase, FeatureExtractor,
-    HybridLaneController, LaneStateMachine, PositionLaneController, Landmark, State,
+    HybridLaneController, LaneStateMachine, PositionLaneController,
+    VerticalGestureDetector, Landmark, State,
 )
 
 
@@ -430,13 +431,15 @@ class Visualizer:
         "left_foot": (80, 200, 80), "right_foot": (80, 160, 255), "lead": (0, 255, 255),
         "hip": (255, 200, 0), "text": (235, 235, 235), "ok": (90, 220, 130),
         "bad": (90, 90, 240), "warn": (90, 200, 240),
+        "neutral_y": (200, 200, 200), "jump_line": (120, 230, 120),
+        "crouch_line": (90, 140, 240), "chest": (255, 255, 255),
     }
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.trails = {"left": deque(maxlen=12), "right": deque(maxlen=12)}
 
-    def draw(self, frame, calib, features, decision, metrics):
+    def draw(self, frame, calib, features, decision, metrics, gesture=None):
         cfg = self.cfg
         if cfg.invert_x:
             frame = cv2.flip(frame, 1)
@@ -479,26 +482,86 @@ class Visualizer:
         cv2.drawMarker(frame, (px(features.hip_x), h // 2), self.COLORS["hip"],
                        cv2.MARKER_DIAMOND, 16, 2)
 
-        self._panel(frame, calib, features, decision, metrics)
+        # vertical jump/crouch guides: neutral chest height + jump/crouch thresholds
+        self._draw_vertical(frame, calib, features, gesture, w, h)
+
+        # big JUMP/DUCK badge, held for the cooldown window after a gesture fires
+        self._gesture_badge(frame, gesture, w, h)
+
+        self._panel(frame, calib, features, decision, metrics, gesture)
         return frame
 
-    def _panel(self, frame, calib, features, decision, metrics):
+    def _gesture_badge(self, frame, gesture, w, h):
+        """Show the most recent one-shot gesture as a large centered banner for the
+        duration of its cooldown, with a bar that drains as the cooldown elapses."""
+        if gesture is None or not gesture.active:
+            return
+        label = gesture.active.upper()                     # "JUMP" / "DUCK"
+        color = (self.COLORS["jump_line"] if gesture.active == "jump"
+                 else self.COLORS["crouch_line"])
+        cooldown = max(self.cfg.gesture_cooldown, 1e-6)
+        frac = max(0.0, min(1.0, gesture.cooldown_remaining / cooldown))
+
+        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 1.6, 4
+        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+        x = (w - tw) // 2
+        y = 40 + th
+        cv2.rectangle(frame, (x - 18, y - th - 16), (x + tw + 18, y + 26), (20, 20, 20), -1)
+        cv2.putText(frame, label, (x, y), font, scale, color, thick, cv2.LINE_AA)
+        # cooldown countdown bar (full right after firing, empties as it elapses)
+        bx, by, bw = x - 18, y + 14, tw + 36
+        cv2.rectangle(frame, (bx, by), (bx + bw, by + 8), (60, 60, 60), -1)
+        cv2.rectangle(frame, (bx, by), (bx + int(bw * frac), by + 8), color, -1)
+
+    def _draw_vertical(self, frame, calib, features, gesture, w, h):
+        """Horizontal guide lines at the calibrated neutral chest height and the
+        jump/crouch thresholds, plus a marker at the live chest point."""
+        cfg = self.cfg
+        torso = max(calib.torso_height, 0.12)
+
+        def hline(norm_y, color, label):
+            y = int(norm_y * h)
+            if 0 <= y < h:
+                cv2.line(frame, (0, y), (w, y), color, 1, cv2.LINE_AA)
+                cv2.putText(frame, label, (w - 70, max(12, y - 4)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+
+        hline(calib.neutral_body_y, self.COLORS["neutral_y"], "neutral")
+        hline(calib.neutral_body_y + cfg.jump_offset * torso, self.COLORS["jump_line"], "jump")
+        hline(calib.neutral_body_y + cfg.duck_offset * torso, self.COLORS["crouch_line"], "crouch")
+
+        # live chest point (highlighted on the frame a gesture fires)
+        if features.body_y_conf > 0:
+            cx = int(features.body_x * w)
+            cy = int(features.body_y * h)
+            fired = gesture is not None and (gesture.jump or gesture.duck)
+            col = self.COLORS["lead"] if fired else self.COLORS["chest"]
+            cv2.circle(frame, (cx, cy), 7 if fired else 5, col, -1 if fired else 2)
+
+    def _panel(self, frame, calib, features, decision, metrics, gesture=None):
         # tick = signal already clears its threshold; helps see why intent is "weak"
         vmark = "OK" if decision.lead_vx >= decision.vel_thr else "--"
         dmark = "OK" if decision.lead_disp >= decision.disp_thr else "--"
+        if gesture is not None:
+            arm = ("J" if gesture.jump_armed else "-") + ("D" if gesture.duck_armed else "-")
+            vert = (f"vert off:{gesture.vertical_offset:+.2f} vel:{gesture.vertical_velocity:+.2f} "
+                    f"arm[{arm}] g:{gesture.reason}")
+        else:
+            vert = "vert: (no gesture detector)"
         lines = [
             f"mode: {decision.controller}   state: {decision.state.name}   lane: {decision.current_lane:+d}",
             f"lane out: {metrics['lane_out']:+d}   last: {metrics['last_output'] or '-'}   intent: {decision.intent_confidence:.2f}",
             f"lead foot: {decision.leading_foot or '-'}   reason: {decision.reason}",
             f"vx: {decision.lead_vx:.2f}/{decision.vel_thr:.2f} {vmark}   "
             f"disp: {decision.lead_disp:+.3f}/{decision.disp_thr:.3f} {dmark}",
-            f"suppressed: {decision.suppressed}",
+            vert,
+            f"last gesture: {metrics['last_gesture'] or '-'}   suppressed: {decision.suppressed}",
             f"FPS: {metrics['fps']:.1f}   cap->cmd: {metrics['last_latency_ms']:.0f} ms",
             f"infer: {metrics['infer_ms']:.1f} ms   classify: {metrics['classify_ms']:.2f} ms",
             f"hip_conf: {features.hip_conf:.2f}  ws: {'on' if metrics['ws'] else 'off'}",
         ]
         y = frame.shape[0] - 8 - 18 * (len(lines) - 1)
-        cv2.rectangle(frame, (4, y - 18), (360, frame.shape[0] - 2), (20, 20, 20), -1)
+        cv2.rectangle(frame, (4, y - 18), (390, frame.shape[0] - 2), (20, 20, 20), -1)
         for i, ln in enumerate(lines):
             cv2.putText(frame, ln, (10, y + 18 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
                         self.COLORS["text"], 1, cv2.LINE_AA)
@@ -547,13 +610,14 @@ class App:
         self.calibrator: Optional[Calibrator] = None
         self.calib: Optional[Calibration] = None
         self.sm: Optional[LaneStateMachine] = None
+        self.gesture: Optional[VerticalGestureDetector] = None
         self._last_output_lane = 0
 
         self._fps = 0.0
         self._last_frame_ts = 0.0
         self._metrics = {
             "fps": 0.0, "last_latency_ms": 0.0, "infer_ms": 0.0, "classify_ms": 0.0,
-            "lane_out": 0, "last_output": None, "ws": False,
+            "lane_out": 0, "last_output": None, "last_gesture": None, "ws": False,
         }
 
         if args.load_calib:
@@ -573,6 +637,8 @@ class App:
             self.sm = LaneStateMachine(self.cfg, self.calib)
         else:
             self.sm = PositionLaneController(self.cfg, self.calib)
+        # Vertical jump/crouch detector shares the same calibration + features.
+        self.gesture = VerticalGestureDetector(self.cfg, self.calib)
         self.calibrator = None
 
     def _output_lane(self, lane: int) -> bool:
@@ -599,6 +665,16 @@ class App:
             if isinstance(self.emitter, GamePhoneEmitter):
                 self._metrics["last_output"] = f"lane {lane:+d}"
         return changed
+
+    def _output_event(self, kind: str) -> None:
+        """Emit a one-shot jump/duck gesture through the active transport."""
+        self._metrics["last_gesture"] = kind
+        if isinstance(self.emitter, GamePhoneEmitter):
+            self.emitter.event(kind)                       # phone:jump / phone:duck
+        elif isinstance(self.emitter, WebSocketEmitter):
+            self.emitter.send("up" if kind == "jump" else "down")  # legacy key tap
+        elif self.emitter is None:
+            print(f"[gesture] {kind}  (t={time.perf_counter():.3f})")
 
     def run(self) -> None:
         win = f"pose_input - {self.args.mode} lanes"
@@ -635,6 +711,7 @@ class App:
                 if key == ord("c"):                       # recalibrate
                     self.calibrator = Calibrator(self.cfg)
                     self.sm = None
+                    self.gesture = None
                 if key == ord(" ") and self.calibrator is not None:
                     if self.calibrator.next_phase():
                         self.calib = self.calibrator.compute()
@@ -659,6 +736,7 @@ class App:
     def _run_play(self, frame, features, cap_ts, infer_ms):
         t0 = time.perf_counter()
         decision = self.sm.update(features, cap_ts)
+        gesture = self.gesture.update(features, cap_ts) if self.gesture else None
         classify_ms = (time.perf_counter() - t0) * 1000.0
 
         self._metrics["fps"] = self._fps
@@ -667,8 +745,13 @@ class App:
         self._metrics["ws"] = bool(self.emitter and self.emitter.connected)
         if self._output_lane(decision.current_lane):
             self._metrics["last_latency_ms"] = (time.perf_counter() - cap_ts) * 1000.0
+        if gesture is not None:
+            if gesture.jump:
+                self._output_event("jump")
+            elif gesture.duck:
+                self._output_event("duck")
 
-        return self.viz.draw(frame, self.calib, features, decision, self._metrics)
+        return self.viz.draw(frame, self.calib, features, decision, self._metrics, gesture)
 
 
 def parse_args():

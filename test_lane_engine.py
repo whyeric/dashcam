@@ -12,6 +12,7 @@ import sys
 
 from lane_engine import (
     Config, Calibration, FeatureExtractor, LaneStateMachine, Landmark, State,
+    VerticalGestureDetector,
 )
 
 FPS = 60.0
@@ -262,6 +263,160 @@ def test_calibrator():
     return ok
 
 
+# --------------------------------------------------------------------------- #
+# Vertical gesture (jump / crouch) tests
+# --------------------------------------------------------------------------- #
+class GSim:
+    """Feeds vertically-translated landmark streams through FeatureExtractor +
+    VerticalGestureDetector. ``dy`` > 0 moves the torso DOWN (crouch), dy < 0 UP
+    (jump). Shoulder and hip translate together so torso length is preserved (so a
+    crouch here is a body drop, not a torso compression)."""
+
+    def __init__(self, calib=None, **cfg_over):
+        self.cfg = Config(invert_x=False, **cfg_over)
+        self.calib = calib or Calibration.default(self.cfg)
+        self.fx = FeatureExtractor(self.cfg)
+        self.det = VerticalGestureDetector(self.cfg, self.calib)
+        self.t = 0.0
+        self.jumps = 0
+        self.ducks = 0
+        self.last = None
+
+    def feed(self, dy=0.0, conf=0.95):
+        lm = make_lm(0.45, 0.55, 0.50, hip_y=0.55 + dy, sh_y=0.35 + dy, conf=conf)
+        f = self.fx.update(lm, self.t)
+        g = self.det.update(f, self.t)
+        self.last = g
+        if g.jump:
+            self.jumps += 1
+        if g.duck:
+            self.ducks += 1
+        self.t += DT
+        return g
+
+    def hold(self, n, dy=0.0, conf=0.95):
+        for _ in range(n):
+            self.feed(dy, conf)
+
+    def ramp(self, dy0, dy1, n, conf=0.95):
+        for i in range(n):
+            self.feed(lerp(dy0, dy1, (i + 1) / n), conf)
+
+
+def test_gesture_neutral_quiet():
+    print("test_gesture_neutral_quiet")
+    g = GSim()
+    g.hold(30)                                           # just stand there
+    ok = True
+    ok &= check("no jump while neutral", g.jumps == 0)
+    ok &= check("no duck while neutral", g.ducks == 0)
+    return ok
+
+
+def test_gesture_jump_once():
+    print("test_gesture_jump_once")
+    g = GSim()
+    g.hold(10)
+    g.ramp(0.0, -0.10, 6)                                # spring up
+    g.ramp(-0.10, 0.0, 6)                                # come back down
+    g.hold(10)
+    ok = True
+    ok &= check("exactly one jump", g.jumps == 1)
+    ok &= check("no duck", g.ducks == 0)
+    return ok
+
+
+def test_gesture_jump_no_repeat_until_rearm():
+    print("test_gesture_jump_no_repeat_until_rearm")
+    g = GSim()
+    g.hold(10)
+    g.ramp(0.0, -0.10, 6)
+    g.hold(30, dy=-0.10)                                 # hold at the top
+    held = g.jumps
+    g.ramp(-0.10, 0.0, 6)                                # return past the re-arm offset
+    g.hold(8)
+    g.ramp(0.0, -0.10, 6)                                # jump again
+    g.hold(6, dy=-0.10)
+    ok = True
+    ok &= check("only one jump while held up", held == 1)
+    ok &= check("re-arms and fires a second jump", g.jumps == 2)
+    return ok
+
+
+def test_gesture_duck_once():
+    print("test_gesture_duck_once")
+    g = GSim()
+    g.hold(10)
+    g.ramp(0.0, 0.12, 6)                                 # drop fast into a crouch
+    g.ramp(0.12, 0.0, 6)                                 # stand back up
+    g.hold(10)
+    ok = True
+    ok &= check("exactly one duck", g.ducks == 1)
+    ok &= check("no jump", g.jumps == 0)
+    return ok
+
+
+def test_gesture_slow_crouch_held():
+    """A slow squat never trips the velocity gate, but holding below the crouch
+    line long enough still fires exactly one duck."""
+    print("test_gesture_slow_crouch_held")
+    g = GSim()
+    g.hold(10)
+    g.ramp(0.0, 0.10, 100)                               # very slow descent (low velocity)
+    g.hold(15, dy=0.10)                                  # held low
+    return check("held slow crouch emits one duck", g.ducks == 1)
+
+
+def test_gesture_low_confidence_ignored():
+    print("test_gesture_low_confidence_ignored")
+    g = GSim()
+    g.hold(10)                                           # confident neutral baseline
+    g.ramp(0.0, -0.12, 6, conf=0.2)                      # jump-like motion, low conf
+    g.hold(8, dy=-0.12, conf=0.2)
+    ok = True
+    ok &= check("no jump from low-confidence body", g.jumps == 0)
+    ok &= check("no duck from low-confidence body", g.ducks == 0)
+    return ok
+
+
+def test_gesture_indicator_holds_for_cooldown():
+    """The on-screen indicator (GestureDecision.active) should stay set for the
+    cooldown window after a one-shot gesture, then clear."""
+    print("test_gesture_indicator_holds_for_cooldown")
+    g = GSim()
+    g.hold(10)
+    g.ramp(0.0, -0.10, 6)                                # jump fires
+    ok = True
+    ok &= check("jumped once", g.jumps == 1)
+    ok &= check("indicator active right after fire", g.last.active == "jump")
+    ok &= check("cooldown_remaining counting down", 0.0 < g.last.cooldown_remaining <= g.cfg.gesture_cooldown)
+    # hold up past the cooldown (20 frames @60fps = 0.33s > 0.25s); indicator clears
+    g.hold(20, dy=-0.10)
+    ok &= check("still only one jump", g.jumps == 1)
+    ok &= check("indicator clears after cooldown", g.last.active is None)
+    return ok
+
+
+def test_gesture_suppresses_lane():
+    """A crouch (body drop, torso length unchanged) must suppress lane changes:
+    a full sidestep made while crouched produces no lane command."""
+    print("test_gesture_suppresses_lane")
+    s = Sim()
+    s.hold(0.45, 0.55, 0.50, 12)
+    # sink into a crouch first (feet planted, torso drops ~0.07)
+    for i in range(8):
+        dy = 0.07 * (i + 1) / 8
+        s.feed(make_lm(0.45, 0.55, 0.50, hip_y=0.55 + dy, sh_y=0.35 + dy))
+    # then, while held in the crouch, slide the right foot fully into the right lane
+    for i in range(16):
+        f = i / 15.0
+        ra = lerp(0.55, 0.78, f)
+        rk = lerp(0.55, 0.76, f)
+        hip = lerp(0.50, 0.74, f)
+        s.feed(make_lm(0.45, ra, hip, hip_y=0.62, sh_y=0.42, rk_x=rk))
+    return check("no lane command while crouched", len(s.commands) == 0)
+
+
 def main():
     tests = [
         test_sidestep_right,
@@ -273,6 +428,14 @@ def main():
         test_left_to_right_two_steps,
         test_latency_under_budget,
         test_calibrator,
+        test_gesture_neutral_quiet,
+        test_gesture_jump_once,
+        test_gesture_jump_no_repeat_until_rearm,
+        test_gesture_duck_once,
+        test_gesture_slow_crouch_held,
+        test_gesture_low_confidence_ignored,
+        test_gesture_indicator_holds_for_cooldown,
+        test_gesture_suppresses_lane,
     ]
     results = []
     for t in tests:
