@@ -3,3 +3,8 @@ npm-debug.log*
 *.log
 .env
 .DS_Store
+__pycache__/
+*.pyc
+
+lane_log.csv
+

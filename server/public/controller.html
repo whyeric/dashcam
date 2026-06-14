@@ -3,229 +3,803 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Phone Controller (test)</title>
+    <title>Phone Pose Controller</title>
     <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-      html, body { margin: 0; height: 100%; }
+      :root {
+        color-scheme: dark;
+        --bg: #090d13;
+        --panel: #111821;
+        --panel-2: #151f2a;
+        --line: #2b3745;
+        --text: #e8eef5;
+        --muted: #8b9aaa;
+        --ok: #45c48f;
+        --bad: #ff6470;
+        --warn: #ffd166;
+        --blue: #4da3ff;
+        --violet: #b088ff;
+      }
+
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      html,
       body {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-        background: #0d1117;
-        color: #e6edf3;
+        margin: 0;
+        min-height: 100%;
+      }
+
+      body {
         padding: 14px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         touch-action: manipulation;
         user-select: none;
         -webkit-user-select: none;
       }
-      h1 { font-size: 14px; color: #7d8590; margin: 0 0 4px; letter-spacing: 0.5px; }
-      .note { font-size: 11px; color: #6e7681; margin-bottom: 12px; }
-      .status { font-size: 13px; margin-bottom: 12px; }
-      .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; border: 1px solid #30363d; font-size: 12px; }
-      .pill.ok { color: #3fb950; border-color: #2ea04340; background: #2ea04318; }
-      .pill.bad { color: #f85149; border-color: #f8514940; background: #f8514918; }
 
-      .join { display: flex; gap: 8px; margin-bottom: 16px; }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      h1 {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+        letter-spacing: 0;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .pill {
+        min-width: 0;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0d131b;
+        color: var(--muted);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .pill.ok { color: var(--ok); border-color: rgba(69, 196, 143, 0.42); background: rgba(69, 196, 143, 0.1); }
+      .pill.bad { color: var(--bad); border-color: rgba(255, 100, 112, 0.42); background: rgba(255, 100, 112, 0.1); }
+      .pill.warn { color: var(--warn); border-color: rgba(255, 209, 102, 0.42); background: rgba(255, 209, 102, 0.1); }
+      .pill.blue { color: #9ccfff; border-color: rgba(77, 163, 255, 0.42); background: rgba(77, 163, 255, 0.1); }
+
+      .panel {
+        margin-bottom: 12px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .join {
+        display: flex;
+        gap: 8px;
+      }
+
       input[type="tel"] {
-        flex: 1; font-size: 28px; text-align: center; letter-spacing: 8px;
-        padding: 12px; border-radius: 10px; border: 1px solid #30363d;
-        background: #161b22; color: #e6edf3; font-family: inherit;
+        flex: 1;
+        min-width: 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0d131b;
+        color: var(--text);
+        font: inherit;
+        font-size: 28px;
+        letter-spacing: 8px;
+        text-align: center;
       }
 
       button {
-        font-family: inherit; font-weight: 700; color: #e6edf3;
-        background: #21262d; border: 1px solid #30363d; border-radius: 12px;
-        padding: 18px; font-size: 16px; touch-action: manipulation;
+        min-height: 48px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #202a36;
+        color: var(--text);
+        font: inherit;
+        font-size: 15px;
+        font-weight: 800;
+        cursor: pointer;
       }
-      button:active { transform: scale(0.97); }
-      button:disabled { opacity: 0.4; }
 
-      .btn-join { background: #1f6feb; border-color: #1f6feb; padding: 12px 18px; }
-      .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
-      .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+      button:active {
+        transform: scale(0.98);
+      }
 
-      .run.on { background: #238636; border-color: #2ea043; }
-      .lane.on { background: #1f6feb; border-color: #388bfd; }
-      .plank.on { background: #8957e5; border-color: #a371f7; }
-      .jump { background: #1f6feb33; border-color: #1f6feb; }
-      .duck { background: #8957e533; border-color: #8957e5; }
+      button:disabled {
+        cursor: default;
+        opacity: 0.45;
+        transform: none;
+      }
 
-      .section { margin-bottom: 16px; }
-      .label { font-size: 12px; color: #7d8590; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-      .slider-row { display: flex; align-items: center; gap: 10px; }
-      input[type="range"] { flex: 1; }
-      .ival { width: 48px; text-align: right; font-size: 16px; }
+      .primary {
+        background: #1e6bd6;
+        border-color: #3180f2;
+      }
 
-      #log { font-size: 11px; color: #6e7681; height: 88px; overflow-y: auto; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 8px; }
-      .err { color: #f85149; }
-      .ack { color: #3fb950; }
+      .danger {
+        background: rgba(255, 100, 112, 0.16);
+        border-color: rgba(255, 100, 112, 0.42);
+      }
+
+      .grid2,
+      .grid3 {
+        display: grid;
+        gap: 8px;
+      }
+
+      .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+      .label {
+        margin: 0 0 7px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+
+      .camera-shell {
+        position: relative;
+        overflow: hidden;
+        aspect-ratio: 3 / 4;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #05080d;
+      }
+
+      video,
+      canvas {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      canvas {
+        pointer-events: none;
+      }
+
+      .mirrored video,
+      .mirrored canvas {
+        transform: scaleX(-1);
+      }
+
+      .camera-empty {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 18px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 12px;
+      }
+
+      .camera-shell.has-video .camera-empty {
+        display: none;
+      }
+
+      .camera-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .toggles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel-2);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--blue);
+      }
+
+      .metrics {
+        display: grid;
+        gap: 10px;
+      }
+
+      .meter {
+        height: 14px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #080c11;
+      }
+
+      .meter > span {
+        display: block;
+        width: 0%;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, var(--blue), var(--ok));
+        transition: width 120ms linear;
+      }
+
+      .lane-state {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+      }
+
+      .lane-state span {
+        padding: 8px 4px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .lane-state span.on {
+        color: white;
+        border-color: #3180f2;
+        background: rgba(77, 163, 255, 0.22);
+      }
+
+      .pose-debug {
+        min-height: 18px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .manual button.on {
+        background: #238636;
+        border-color: #45c48f;
+      }
+
+      .manual .lane.on {
+        background: #1e6bd6;
+        border-color: #4da3ff;
+      }
+
+      .manual .plank.on {
+        background: #7450d1;
+        border-color: var(--violet);
+      }
+
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      input[type="range"] {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .value {
+        width: 48px;
+        color: var(--muted);
+        text-align: right;
+      }
+
+      #log {
+        height: 112px;
+        overflow-y: auto;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #0d131b;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .err { color: var(--bad); }
+      .ack { color: var(--ok); }
       .hidden { display: none; }
+
+      @media (min-width: 720px) {
+        body {
+          max-width: 760px;
+          margin: 0 auto;
+        }
+
+        .layout {
+          display: grid;
+          grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
+          gap: 12px;
+        }
+      }
     </style>
   </head>
   <body>
-    <h1>PHONE CONTROLLER · TEST HARNESS</h1>
-    <div class="note">Manual controls to test the transport. NOT the real pose-detection controller (that's a separate task).</div>
+    <header>
+      <h1>PHONE POSE CONTROLLER</h1>
+      <span id="modePill" class="pill blue">manual ready</span>
+    </header>
 
-    <div class="status">
-      socket: <span id="sock" class="pill bad">connecting…</span>
-      &nbsp; session: <span id="sess" class="pill bad">not joined</span>
+    <div class="status-grid">
+      <span id="sock" class="pill bad">socket connecting</span>
+      <span id="sess" class="pill bad">session not joined</span>
+      <span id="poseStatus" class="pill bad">pose stopped</span>
+      <span id="secureStatus" class="pill warn">camera locked</span>
     </div>
 
-    <div class="join" id="joinRow">
-      <input id="code" type="tel" inputmode="numeric" maxlength="4" placeholder="0000" />
-      <button class="btn-join" id="joinBtn">JOIN</button>
-    </div>
-
-    <div id="controls" class="hidden">
-      <div class="section">
-        <div class="label">Run (high knees) — sends running_state @10Hz while ON</div>
-        <button class="run" id="runBtn" style="width:100%">RUN: OFF</button>
-        <div class="slider-row" style="margin-top:10px">
-          <span class="label" style="margin:0">intensity</span>
-          <input type="range" id="intensity" min="0" max="1" step="0.05" value="0.8" />
-          <span class="ival" id="ival">0.80</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="label">Lane (lean) — heartbeat @5Hz + on tap</div>
-        <div class="grid3">
-          <button class="lane" data-lane="-1">◀ LEFT</button>
-          <button class="lane on" data-lane="0">CENTER</button>
-          <button class="lane" data-lane="1">RIGHT ▶</button>
-        </div>
-      </div>
-
-      <div class="section">
-        <div class="label">Plank (jetpack) — toggle, heartbeat while ON</div>
-        <button class="plank" id="plankBtn" style="width:100%">PLANK: OFF</button>
-      </div>
-
-      <div class="section">
-        <div class="label">One-shot events</div>
-        <div class="grid2">
-          <button class="jump" id="jumpBtn">JUMP ⤒</button>
-          <button class="duck" id="duckBtn">DUCK ⤓</button>
-        </div>
+    <div id="joinPanel" class="panel">
+      <p class="label">Pairing code</p>
+      <div class="join">
+        <input id="code" type="tel" inputmode="numeric" maxlength="4" placeholder="0000" autocomplete="one-time-code" />
+        <button class="primary" id="joinBtn">JOIN</button>
       </div>
     </div>
 
-    <div class="label">server log</div>
+    <div class="layout">
+      <section class="panel">
+        <p class="label">Camera</p>
+        <div id="cameraShell" class="camera-shell mirrored">
+          <video id="camera" playsinline muted></video>
+          <canvas id="poseCanvas"></canvas>
+          <div class="camera-empty" id="cameraEmpty">Join a session, then start camera.</div>
+        </div>
+
+        <div class="camera-actions">
+          <button class="primary" id="startPoseBtn" disabled>START CAMERA</button>
+          <button class="danger" id="stopPoseBtn" disabled>STOP</button>
+        </div>
+        <div class="camera-actions">
+          <button id="recalibrateBtn" disabled>RECALIBRATE</button>
+          <button id="neutralBtn" disabled>NEUTRAL</button>
+        </div>
+
+        <div class="toggles">
+          <label class="toggle"><input id="mirrorToggle" type="checkbox" checked /> Mirror</label>
+          <label class="toggle"><input id="posePlankToggle" type="checkbox" /> Pose plank</label>
+        </div>
+      </section>
+
+      <section>
+        <div class="panel">
+          <p class="label">Pose output</p>
+          <div class="metrics">
+            <div>
+              <p class="label">Calibration</p>
+              <div class="meter"><span id="calibrationBar"></span></div>
+            </div>
+            <div>
+              <p class="label">Running intensity <span id="intensityLabel">0.00</span></p>
+              <div class="meter"><span id="intensityBar"></span></div>
+            </div>
+            <div>
+              <p class="label">Lane</p>
+              <div class="lane-state">
+                <span id="laneLeft">LEFT</span>
+                <span id="laneCenter" class="on">CENTER</span>
+                <span id="laneRight">RIGHT</span>
+              </div>
+            </div>
+            <p class="pose-debug" id="poseDebug">waiting for camera</p>
+          </div>
+        </div>
+
+        <div id="manualPanel" class="panel manual hidden">
+          <p class="label">Manual fallback</p>
+          <div class="section">
+            <button class="run" id="runBtn" style="width:100%">RUN OFF</button>
+            <div class="slider-row" style="margin-top:8px">
+              <input type="range" id="intensity" min="0" max="1" step="0.05" value="0.8" />
+              <span class="value" id="manualIntensityLabel">0.80</span>
+            </div>
+          </div>
+          <div class="grid3" style="margin-top:8px">
+            <button class="lane" data-lane="-1">LEFT</button>
+            <button class="lane on" data-lane="0">CENTER</button>
+            <button class="lane" data-lane="1">RIGHT</button>
+          </div>
+          <div class="grid2" style="margin-top:8px">
+            <button class="plank" id="plankBtn">PLANK OFF</button>
+            <button id="jumpBtn">JUMP</button>
+          </div>
+          <div class="grid2" style="margin-top:8px">
+            <button id="duckBtn">DUCK</button>
+            <button id="manualNeutralBtn">NEUTRAL</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <p class="label">Server log</p>
     <div id="log"></div>
 
-    <script>
-      const $ = (s) => document.querySelector(s);
+    <script type="module">
+      import { PoseController } from "./poseController.js?v=20260613-hybridonly1";
+
+      const $ = (selector) => document.querySelector(selector);
       const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+      const supportsCamera = window.isSecureContext && navigator.mediaDevices?.getUserMedia;
 
-      let ws, joined = false;
-      const state = { running: false, lane: 0, plank: false, intensity: 0.8 };
-      let runTimer = null, laneTimer = null, plankTimer = null;
+      let ws;
+      let joined = false;
+      let poseActive = false;
+      const manualState = { running: false, lane: 0, plank: false, intensity: 0.8 };
+      let runTimer = null;
+      let laneTimer = null;
+      let plankTimer = null;
 
-      // ---- connection ----
+      const pose = new PoseController({
+        video: $("#camera"),
+        canvas: $("#poseCanvas"),
+        send,
+        onStatus: setPoseStatus,
+        onMetrics: updatePoseMetrics,
+        onError: (error) => log(error.message || String(error), "err")
+      });
+
+      setSecureStatus();
+      connect();
+
+      $("#joinBtn").addEventListener("click", join);
+      $("#code").addEventListener("input", (event) => {
+        event.target.value = event.target.value.replace(/\D/g, "").slice(0, 4);
+      });
+      $("#code").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") join();
+      });
+
+      $("#startPoseBtn").addEventListener("click", startPose);
+      $("#stopPoseBtn").addEventListener("click", stopPose);
+      $("#recalibrateBtn").addEventListener("click", () => pose.recalibrate());
+      $("#neutralBtn").addEventListener("click", sendNeutral);
+      $("#manualNeutralBtn").addEventListener("click", sendNeutral);
+      $("#mirrorToggle").addEventListener("change", updateMirror);
+
+      $("#runBtn").addEventListener("click", toggleManualRun);
+      $("#intensity").addEventListener("input", (event) => {
+        manualState.intensity = parseFloat(event.target.value);
+        $("#manualIntensityLabel").textContent = manualState.intensity.toFixed(2);
+      });
+      $("#plankBtn").addEventListener("click", toggleManualPlank);
+      $("#jumpBtn").addEventListener("click", () => send("phone:jump", {}));
+      $("#duckBtn").addEventListener("click", () => send("phone:duck", {}));
+
+      document.querySelectorAll("button.lane").forEach((button) => {
+        button.addEventListener("click", () => setManualLane(parseInt(button.dataset.lane, 10)));
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) sendNeutral();
+      });
+
       function connect() {
         ws = new WebSocket(wsUrl);
-        ws.onopen = () => setPill("sock", true, "open");
+        setPill("sock", "bad", "socket connecting");
+
+        ws.onopen = () => {
+          setPill("sock", "ok", "socket open");
+          log("socket open", "ack");
+        };
+
         ws.onclose = () => {
-          setPill("sock", false, "closed");
-          setPill("sess", false, "not joined");
-          joined = false; stopAllTimers(); showControls(false);
-          log("socket closed — reconnecting in 1.5s", "err");
+          setPill("sock", "bad", "socket closed");
+          setPill("sess", "bad", "session not joined");
+          joined = false;
+          stopPose();
+          stopManualTimers();
+          showControls(false);
+          log("socket closed; reconnecting", "err");
           setTimeout(connect, 1500);
         };
+
         ws.onerror = () => log("socket error", "err");
-        ws.onmessage = (e) => {
-          let m; try { m = JSON.parse(e.data); } catch { return; }
-          handle(m);
+        ws.onmessage = (event) => {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          handleMessage(message);
         };
       }
 
-      function handle(m) {
-        switch (m.type) {
+      function handleMessage(message) {
+        switch (message.type) {
           case "session:joined":
             joined = true;
-            setPill("sess", true, m.data.sessionCode);
+            setPill("sess", "ok", "session " + message.data.sessionCode);
             showControls(true);
-            startLaneHeartbeat();
-            log("joined session " + m.data.sessionCode, "ack");
+            startManualLaneHeartbeat();
+            log("joined session " + message.data.sessionCode, "ack");
             break;
           case "error":
-            log("ERROR " + m.data.code + " — " + m.data.message, "err");
-            if (m.data.code === "SESSION_NOT_FOUND" || m.data.code === "SESSION_FULL") {
-              joined = false; setPill("sess", false, "not joined"); showControls(false);
+            log("ERROR " + message.data.code + " - " + message.data.message, "err");
+            if (message.data.code === "SESSION_NOT_FOUND" || message.data.code === "SESSION_FULL") {
+              joined = false;
+              setPill("sess", "bad", "session not joined");
+              showControls(false);
             }
             break;
-          case "pong": break;
+          case "pong":
+            break;
         }
+      }
+
+      function join() {
+        const code = $("#code").value.trim();
+        if (!/^\d{4}$/.test(code)) {
+          log("enter a 4-digit code", "err");
+          return;
+        }
+        send("phone:join", { sessionCode: code });
+        log("phone:join " + code);
+      }
+
+      async function startPose() {
+        if (!joined) {
+          log("join a session first", "err");
+          return;
+        }
+        if (!supportsCamera) {
+          log("camera requires HTTPS, localhost, or a secure tunnel", "err");
+          return;
+        }
+
+        stopManualTimers();
+        setMode("pose starting");
+        setPoseStatus("loading model");
+        try {
+          await pose.start({
+            mirrorControls: $("#mirrorToggle").checked,
+            enablePosePlank: $("#posePlankToggle").checked
+          });
+          poseActive = true;
+          $("#cameraShell").classList.add("has-video");
+          $("#startPoseBtn").disabled = true;
+          $("#stopPoseBtn").disabled = false;
+          $("#recalibrateBtn").disabled = false;
+          $("#neutralBtn").disabled = false;
+          setMode("pose active");
+        } catch (error) {
+          poseActive = false;
+          startManualLaneHeartbeat();
+          setMode("manual ready");
+          setPoseStatus("camera error");
+          log(error.message || String(error), "err");
+        }
+      }
+
+      function stopPose() {
+        if (!poseActive && !$("#camera").srcObject) return;
+        pose.stop();
+        poseActive = false;
+        $("#cameraShell").classList.remove("has-video");
+        $("#startPoseBtn").disabled = !joined || !supportsCamera;
+        $("#stopPoseBtn").disabled = true;
+        $("#recalibrateBtn").disabled = true;
+        $("#neutralBtn").disabled = !joined;
+        setMode(joined ? "manual ready" : "manual locked");
+        if (joined) startManualLaneHeartbeat();
+      }
+
+      function toggleManualRun() {
+        if (poseActive) return;
+        manualState.running = !manualState.running;
+        $("#runBtn").classList.toggle("on", manualState.running);
+        $("#runBtn").textContent = "RUN " + (manualState.running ? "ON" : "OFF");
+
+        clearInterval(runTimer);
+        runTimer = null;
+        if (manualState.running) {
+          runTimer = setInterval(() => send("phone:running_state", { intensity: manualState.intensity }), 100);
+        } else {
+          send("phone:running_state", { intensity: 0 });
+        }
+      }
+
+      function setManualLane(lane) {
+        if (poseActive) return;
+        manualState.lane = lane;
+        updateManualLaneButtons(lane);
+        updateLaneUI(lane);
+        send("phone:lane_position", { lane });
+      }
+
+      function toggleManualPlank() {
+        if (poseActive) return;
+        manualState.plank = !manualState.plank;
+        $("#plankBtn").classList.toggle("on", manualState.plank);
+        $("#plankBtn").textContent = "PLANK " + (manualState.plank ? "ON" : "OFF");
+        send("phone:plank_state", { active: manualState.plank });
+
+        clearInterval(plankTimer);
+        plankTimer = null;
+        if (manualState.plank) {
+          plankTimer = setInterval(() => send("phone:plank_state", { active: true }), 200);
+        }
+      }
+
+      function startManualLaneHeartbeat() {
+        if (!joined || poseActive) return;
+        clearInterval(laneTimer);
+        laneTimer = setInterval(() => send("phone:lane_position", { lane: manualState.lane }), 200);
+      }
+
+      function stopManualTimers() {
+        [runTimer, laneTimer, plankTimer].forEach(clearInterval);
+        runTimer = null;
+        laneTimer = null;
+        plankTimer = null;
+        resetManualState();
+        sendNeutralMessages();
+      }
+
+      function resetManualState() {
+        manualState.running = false;
+        manualState.plank = false;
+        manualState.lane = 0;
+        $("#runBtn").classList.remove("on");
+        $("#runBtn").textContent = "RUN OFF";
+        $("#plankBtn").classList.remove("on");
+        $("#plankBtn").textContent = "PLANK OFF";
+        updateManualLaneButtons(0);
+        updateLaneUI(0);
+      }
+
+      function sendNeutral() {
+        clearInterval(runTimer);
+        clearInterval(plankTimer);
+        runTimer = null;
+        plankTimer = null;
+        resetManualState();
+        sendNeutralMessages();
+      }
+
+      function sendNeutralMessages() {
+        send("phone:running_state", { intensity: 0 });
+        send("phone:lane_position", { lane: 0 });
+        send("phone:plank_state", { active: false });
       }
 
       function send(type, data = {}) {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, data, t: Date.now() }));
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type, data, t: Date.now() }));
+        }
       }
 
-      // ---- join ----
-      $("#joinBtn").onclick = () => {
-        const code = $("#code").value.trim();
-        if (!/^\d{4}$/.test(code)) { log("enter a 4-digit code", "err"); return; }
-        send("phone:join", { sessionCode: code });
-        log("→ phone:join " + code);
-      };
-
-      // ---- run toggle (running_state @10Hz) ----
-      $("#runBtn").onclick = () => {
-        state.running = !state.running;
-        $("#runBtn").classList.toggle("on", state.running);
-        $("#runBtn").textContent = "RUN: " + (state.running ? "ON" : "OFF");
-        if (state.running) {
-          runTimer = setInterval(() => send("phone:running_state", { intensity: state.intensity }), 100);
-        } else {
-          clearInterval(runTimer); runTimer = null; // heartbeats cease -> server times out in ~300ms
-        }
-      };
-      $("#intensity").oninput = (e) => { state.intensity = parseFloat(e.target.value); $("#ival").textContent = state.intensity.toFixed(2); };
-
-      // ---- lane (heartbeat @5Hz + immediate on tap) ----
-      document.querySelectorAll("button.lane").forEach((b) => {
-        b.onclick = () => {
-          state.lane = parseInt(b.dataset.lane, 10);
-          document.querySelectorAll("button.lane").forEach((x) => x.classList.toggle("on", x === b));
-          send("phone:lane_position", { lane: state.lane });
-        };
-      });
-      function startLaneHeartbeat() {
-        clearInterval(laneTimer);
-        laneTimer = setInterval(() => send("phone:lane_position", { lane: state.lane }), 200);
+      function showControls(show) {
+        $("#joinPanel").classList.toggle("hidden", show);
+        $("#manualPanel").classList.toggle("hidden", !show);
+        $("#startPoseBtn").disabled = !show || !supportsCamera;
+        $("#neutralBtn").disabled = !show;
+        setMode(show ? "manual ready" : "manual locked");
       }
 
-      // ---- plank toggle ----
-      $("#plankBtn").onclick = () => {
-        state.plank = !state.plank;
-        $("#plankBtn").classList.toggle("on", state.plank);
-        $("#plankBtn").textContent = "PLANK: " + (state.plank ? "ON" : "OFF");
-        send("phone:plank_state", { active: state.plank });
-        if (state.plank) {
-          plankTimer = setInterval(() => send("phone:plank_state", { active: true }), 200);
+      function setSecureStatus() {
+        if (supportsCamera) {
+          setPill("secureStatus", "ok", "camera available");
         } else {
-          clearInterval(plankTimer); plankTimer = null;
+          setPill("secureStatus", "warn", "HTTPS needed");
         }
-      };
+      }
 
-      // ---- one-shot events ----
-      $("#jumpBtn").onclick = () => { send("phone:jump", {}); flash("#jumpBtn"); };
-      $("#duckBtn").onclick = () => { send("phone:duck", {}); flash("#duckBtn"); };
+      function setPoseStatus(status) {
+        const type =
+          status === "active" || status === "ready" ? "ok" :
+          status === "calibrating" || status === "loading model" || status === "opening camera" ? "blue" :
+          status === "no human" ? "warn" :
+          "bad";
+        setPill("poseStatus", type, "pose " + status);
+      }
 
-      // ---- helpers ----
-      function stopAllTimers() { [runTimer, laneTimer, plankTimer].forEach(clearInterval); runTimer = laneTimer = plankTimer = null; state.running = false; state.plank = false; }
-      function showControls(on) { $("#controls").classList.toggle("hidden", !on); $("#joinRow").classList.toggle("hidden", on); }
-      function setPill(id, ok, text) { const el = $("#" + id); el.textContent = text; el.className = "pill " + (ok ? "ok" : "bad"); }
-      function flash(sel) { const el = $(sel); el.style.filter = "brightness(1.8)"; setTimeout(() => (el.style.filter = ""), 120); }
+      function updatePoseMetrics(metrics) {
+        const calibration = Math.round((metrics.progress || 0) * 100);
+        const intensity = Math.max(0, Math.min(1, metrics.intensity || 0));
+        const confidence = Number.isFinite(metrics.confidence) ? metrics.confidence : 0;
+        const landmarkCount = Number.isFinite(metrics.landmarks) ? metrics.landmarks : 0;
+        const bothFootRegions = Number.isFinite(metrics.leftFootRegion) && Number.isFinite(metrics.rightFootRegion)
+          ? " - feet " + regionName(metrics.leftFootRegion) + "/" + regionName(metrics.rightFootRegion)
+          : "";
+        const centerRegion = Number.isFinite(metrics.centerMassRegion)
+          ? " - cm " + regionName(metrics.centerMassRegion)
+          : "";
+        const laneIntent = Number.isFinite(metrics.laneIntent) && metrics.laneIntent !== 0
+          ? " - intent " + regionName(metrics.laneIntent)
+          : "";
+        const laneDecision = metrics.laneDecision
+          ? " - " + metrics.laneDecision
+          : "";
+        const laneConfidence = Number.isFinite(metrics.laneConfidence)
+          ? " " + metrics.laneConfidence.toFixed(2)
+          : "";
+        const jumpThreshold = Number.isFinite(metrics.jumpOffsetThreshold)
+          ? " - jumpT " + metrics.jumpOffsetThreshold.toFixed(2)
+          : "";
+        const hint = metrics.hint ? " - " + metrics.hint : "";
+        $("#calibrationBar").style.width = calibration + "%";
+        $("#intensityBar").style.width = Math.round(intensity * 100) + "%";
+        $("#intensityLabel").textContent = intensity.toFixed(2);
+        $("#poseDebug").textContent = (metrics.human ? "human" : "searching") +
+          " - confidence " + confidence.toFixed(2) +
+          " - landmarks " + landmarkCount + bothFootRegions + centerRegion +
+          laneIntent + laneDecision + laneConfidence + jumpThreshold + hint;
+        updateLaneUI(metrics.lane || 0);
+      }
+
+      function regionName(region) {
+        if (region === -1) return "L";
+        if (region === 1) return "R";
+        return "C";
+      }
+
+      function updateLaneUI(lane) {
+        $("#laneLeft").classList.toggle("on", lane === -1);
+        $("#laneCenter").classList.toggle("on", lane === 0);
+        $("#laneRight").classList.toggle("on", lane === 1);
+      }
+
+      function updateManualLaneButtons(lane) {
+        document.querySelectorAll("button.lane").forEach((button) => {
+          button.classList.toggle("on", parseInt(button.dataset.lane, 10) === lane);
+        });
+      }
+
+      function updateMirror() {
+        $("#cameraShell").classList.toggle("mirrored", $("#mirrorToggle").checked);
+      }
+
+      function setMode(text) {
+        $("#modePill").textContent = text;
+      }
+
+      function setPill(id, type, text) {
+        const element = $("#" + id);
+        element.textContent = text;
+        element.className = "pill " + type;
+      }
+
       function log(text, cls) {
-        const el = document.createElement("div");
-        if (cls) el.className = cls;
-        el.textContent = new Date().toLocaleTimeString() + "  " + text;
-        const box = $("#log"); box.prepend(el);
-        while (box.childElementCount > 40) box.removeChild(box.lastChild);
+        const entry = document.createElement("div");
+        if (cls) entry.className = cls;
+        entry.textContent = new Date().toLocaleTimeString() + "  " + text;
+        const box = $("#log");
+        box.prepend(entry);
+        while (box.childElementCount > 50) box.removeChild(box.lastChild);
       }
-
-      connect();
     </script>
   </body>
 </html>

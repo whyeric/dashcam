@@ -1,0 +1,249 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Subway Surfers — 1v1</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
+      .split { display: flex; height: 100vh; }
+      .pane  { flex: 1; position: relative; box-sizing: border-box; border: 4px solid; }
+      .p1 { border-color: #3b82f6; }   /* blue  */
+      .p2 { border-color: #ef4444; }   /* red   */
+      iframe { width: 100%; height: 100%; border: 0; display: block; }
+      .tag {
+        position: absolute; top: 8px; left: 8px; z-index: 10;
+        color: #fff; font: bold 20px sans-serif; padding: 2px 10px;
+        border-radius: 6px; pointer-events: none;
+      }
+      .p1 .tag { background: #3b82f6; }
+      .p2 .tag { background: #ef4444; }
+      .run-indicator {
+        position: absolute; top: 8px; right: 8px; z-index: 10;
+        width: 150px; color: #e5e7eb; pointer-events: none;
+        font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        text-transform: uppercase; letter-spacing: 0.8px;
+      }
+      .run-indicator .run-label {
+        display: flex; justify-content: space-between; gap: 8px;
+        margin-bottom: 5px; text-shadow: 0 1px 2px #000;
+      }
+      .run-indicator .run-status { color: #9ca3af; }
+      .run-indicator.running .run-status { color: #22c55e; }
+      .run-indicator.warning .run-status { color: #f59e0b; }
+      .run-indicator.penalty .run-status { color: #ef4444; }
+      .run-track {
+        height: 8px; overflow: hidden; border-radius: 999px;
+        background: rgba(17, 24, 39, 0.85); border: 1px solid rgba(255, 255, 255, 0.35);
+      }
+      .run-fill {
+        width: 0%; height: 100%; background: #6b7280;
+        transition: width 80ms linear, background-color 120ms linear;
+      }
+      .run-indicator.running .run-fill { background: #22c55e; }
+      .run-indicator.warning .run-fill { background: #f59e0b; }
+      .run-indicator.penalty .run-fill { background: #ef4444; }
+    </style>
+  </head>
+  <body>
+    <div class="split">
+      <div class="pane p1">
+        <span class="tag">P1</span>
+        <div class="run-indicator" data-player="p1">
+          <div class="run-label"><span>run</span><span class="run-status">idle 0.00</span></div>
+          <div class="run-track"><div class="run-fill"></div></div>
+        </div>
+        <iframe src="game.html?player=p1&ws=ws://localhost:8765"></iframe>
+      </div>
+      <div class="pane p2">
+        <span class="tag">P2</span>
+        <div class="run-indicator" data-player="p2">
+          <div class="run-label"><span>run</span><span class="run-status">idle 0.00</span></div>
+          <div class="run-track"><div class="run-fill"></div></div>
+        </div>
+        <iframe src="game.html?player=p2&ws=ws://localhost:8765"></iframe>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var WS_URL = params.get("ws") || "ws://localhost:8765";
+        var RECONNECT_MS = 1000;
+        var STALE_MS = 500;
+        var WARNING_MS = 2000;
+        var KILL_MS = 5000;
+        var SLAM_COUNT = 20;
+        var SLAM_GAP_MS = 100;
+        var SLAM_HOLD_MS = 200;
+        var activeWs = null;
+        var state = {
+          p1: { intensity: 0, running: false, seen: 0, idleSince: 0, killed: false, warning: false, penaltyPaused: false },
+          p2: { intensity: 0, running: false, seen: 0, idleSince: 0, killed: false, warning: false, penaltyPaused: false },
+        };
+
+        function clamp01(value) {
+          value = Number(value) || 0;
+          return Math.max(0, Math.min(1, value));
+        }
+
+        function updateIndicator(player) {
+          var el = document.querySelector('.run-indicator[data-player="' + player + '"]');
+          if (!el) return;
+          var s = state[player];
+          var intensity = clamp01(s.intensity);
+          el.classList.toggle("running", !!s.running);
+          el.classList.toggle("warning", !!s.warning && !s.killed);
+          el.classList.toggle("penalty", !!s.killed);
+          var label = s.killed ? "PENALTY " : s.warning ? "WARNING " : s.running ? "RUNNING " : "idle ";
+          el.querySelector(".run-status").textContent = label + intensity.toFixed(2);
+          el.querySelector(".run-fill").style.width = Math.round(intensity * 100) + "%";
+        }
+
+        function sendControl(player, action, key) {
+          if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return false;
+          activeWs.send(JSON.stringify({ player: player, action: action, key: key }));
+          return true;
+        }
+
+        function slamLeft(player) {
+          if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return false;
+          for (var i = 0; i < SLAM_COUNT; i++) {
+            (function (delay) {
+              setTimeout(function () { sendControl(player, "press", "left"); }, delay);
+              setTimeout(function () { sendControl(player, "release", "left"); }, delay + SLAM_HOLD_MS);
+            })(i * SLAM_GAP_MS);
+          }
+          return true;
+        }
+
+        function clearPenalty(player, pausePenalty) {
+          if (player !== "p1" && player !== "p2") {
+            clearPenalty("p1", pausePenalty);
+            clearPenalty("p2", pausePenalty);
+            return;
+          }
+          var s = state[player];
+          s.warning = false;
+          s.killed = false;
+          s.idleSince = 0;
+          s.penaltyPaused = !!pausePenalty;
+          updateIndicator(player);
+        }
+
+        function resumePenalty(player) {
+          if (player !== "p1" && player !== "p2") {
+            resumePenalty("p1");
+            resumePenalty("p2");
+            return;
+          }
+          var s = state[player];
+          s.penaltyPaused = false;
+          s.warning = false;
+          s.killed = false;
+          s.idleSince = s.running ? 0 : Date.now();
+          updateIndicator(player);
+        }
+
+        function setRunning(player, intensity, running) {
+          if (player !== "p1" && player !== "p2") {
+            setRunning("p1", intensity, running);
+            setRunning("p2", intensity, running);
+            return;
+          }
+          var now = Date.now();
+          var wasIdleSince = state[player].idleSince;
+          var isRunning = running !== undefined ? !!running : clamp01(intensity) > 0.05;
+          state[player] = {
+            intensity: clamp01(intensity),
+            running: isRunning,
+            seen: now,
+            idleSince: isRunning || state[player].penaltyPaused ? 0 : wasIdleSince || now,
+            killed: isRunning || state[player].penaltyPaused ? false : state[player].killed,
+            warning: isRunning || state[player].penaltyPaused ? false : state[player].warning,
+            penaltyPaused: state[player].penaltyPaused,
+          };
+          updateIndicator(player);
+        }
+
+        function runningPayload(msg) {
+          var data = msg && typeof msg.data === "object" ? msg.data : msg;
+          var type = msg && msg.type;
+          var dataType = data && data.type;
+          if (!data) return null;
+          if (
+            type !== "running" &&
+            type !== "running_state" &&
+            type !== "input:state" &&
+            dataType !== "running" &&
+            dataType !== "running_state" &&
+            !("intensity" in data && ("running" in data || "is_running" in data))
+          ) {
+            return null;
+          }
+          return {
+            player: msg.player || data.player,
+            intensity: clamp01(data.intensity),
+            running: data.running !== undefined ? data.running : data.is_running,
+          };
+        }
+
+        function connect() {
+          var ws = new WebSocket(WS_URL);
+          ws.onopen = function () { activeWs = ws; };
+          ws.onmessage = function (event) {
+            try {
+              var msg = JSON.parse(event.data);
+              var run = runningPayload(msg);
+              if (run) setRunning(run.player, run.intensity, run.running);
+            } catch (e) {}
+          };
+          ws.onclose = function () {
+            if (activeWs === ws) activeWs = null;
+            setTimeout(connect, RECONNECT_MS);
+          };
+          ws.onerror = function () { ws.close(); };
+        }
+
+        window.addEventListener("message", function (event) {
+          var msg = event.data;
+          if (!msg || msg.source !== "subway-game") return;
+          if (msg.type === "subway:gameover" || (msg.type === "subway:phase" && msg.phase === "gameover")) {
+            clearPenalty(msg.player, true);
+          } else if (msg.type === "subway:phase" && msg.phase === "running") {
+            resumePenalty(msg.player);
+          }
+        });
+
+        setInterval(function () {
+          var now = Date.now();
+          ["p1", "p2"].forEach(function (player) {
+            var s = state[player];
+            if (state[player].seen && now - state[player].seen > STALE_MS) {
+              s.intensity = 0;
+              s.running = false;
+              if (!s.penaltyPaused) s.idleSince = s.idleSince || now;
+            }
+            if (s.penaltyPaused) {
+              s.warning = false;
+              s.killed = false;
+              s.idleSince = 0;
+              updateIndicator(player);
+              return;
+            }
+            if (s.idleSince && !s.running) {
+              var idleFor = now - s.idleSince;
+              s.warning = idleFor >= WARNING_MS;
+              if (idleFor >= KILL_MS && !s.killed && slamLeft(player)) {
+                s.killed = true;
+              }
+              updateIndicator(player);
+            }
+          });
+        }, 100);
+
+        updateIndicator("p1");
+        updateIndicator("p2");
+        connect();
+      })();
+    </script>
+  </body>
+</html>

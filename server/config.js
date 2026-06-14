@@ -21,7 +21,7 @@ export const config = {
   PORT: intEnv("PORT", 8080),
 
   // --- Tick loop ---
-  TICK_HZ: intEnv("TICK_HZ", 30),
+  TICK_HZ: intEnv("TICK_HZ", 60),
 
   // --- InputState reconstruction timeouts (ms) ---
   RUNNING_TIMEOUT_MS: intEnv("RUNNING_TIMEOUT_MS", 300), // no running_state -> intensity snaps to 0

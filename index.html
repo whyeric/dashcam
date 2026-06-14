@@ -79,6 +79,26 @@
           }));
         }
 
+        // ── Absolute-lane handling (WiFi-robust) ──────────────────────────
+        // The camera PC streams an ABSOLUTE lane (-1|0|1) re-asserted on a timer,
+        // so a dropped packet self-corrects on the next resync instead of leaving
+        // the avatar one lane off. Track the lane already applied and dispatch
+        // only the delta as left/right taps.
+        var appliedLane = 0;
+
+        function tapKey(keyName) {
+          dispatchKey(keyName, "keydown");
+          setTimeout(function () { dispatchKey(keyName, "keyup"); }, 50);
+        }
+
+        function applyLane(lane) {
+          if (lane !== -1 && lane !== 0 && lane !== 1) return;
+          var delta = lane - appliedLane;
+          var dir = delta > 0 ? "right" : "left";
+          for (var i = 0; i < Math.abs(delta); i++) tapKey(dir);
+          appliedLane = lane;
+        }
+
         function connect() { // TODO: client to be changed
           var ws = new WebSocket(WS_URL);
 
@@ -89,6 +109,7 @@
           ws.onmessage = function (event) {
             try {
               var msg = JSON.parse(event.data);
+              if (msg.type === "lane") { applyLane(msg.lane); return; }
               if (msg.action === "press")   dispatchKey(msg.key, "keydown");
               if (msg.action === "release") dispatchKey(msg.key, "keyup");
             } catch (e) {
