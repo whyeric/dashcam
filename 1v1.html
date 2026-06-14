@@ -86,6 +86,25 @@
     <div id="countdown-sub" style="font-size: 1.1rem; color: #9aa0b4;"></div>
   </div>
 
+  <div id="win-screen" style="
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.92);
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 24px;
+    font-family: Arial, sans-serif;
+    color: white;
+    text-align: center;
+    cursor: pointer;
+  ">
+    <div id="win-title" style="font-size: 5rem; font-weight: 900;"></div>
+    <div id="win-sub" style="font-size: 1.2rem; color: #9aa0b4;"></div>
+  </div>
+
   <div class="games">
     <div class="game-wrapper p1">
       <iframe id="game-p1" src="game.html"></iframe>
@@ -227,7 +246,96 @@
     ws.onerror = function () { try { ws.close() } catch (e) {} }
   }
 
+  var ws
+  var winner = null
+
+  window.addEventListener("message", function(event) {
+    if (!event.data || event.data.type !== "game_over") return
+    
+    // figure out which iframe sent this
+    var p1Frame = document.getElementById("game-p1")
+    var p2Frame = document.getElementById("game-p2")
+    
+    var loser = null
+    if (event.source === p1Frame.contentWindow) loser = "p1"
+    if (event.source === p2Frame.contentWindow) loser = "p2"
+    if (!loser || winner) return // already have a winner
+    
+    winner = loser === "p1" ? "p2" : "p1"
+    showWinScreen(winner)
+  })
+
+  function showWinScreen(player) {
+    var overlay = document.getElementById("win-screen")
+    var title = document.getElementById("win-title")
+    var sub = document.getElementById("win-sub")
+    overlay.style.display = "flex"
+    if (player === "p1") {
+      title.textContent = "🟦 Player 1 Wins!"
+      title.style.color = "#4fc3f7"
+    } else {
+      title.textContent = "🟥 Player 2 Wins!"
+      title.style.color = "#ef5350"
+    }
+    sub.textContent = "Tap anywhere to play again"
+    overlay.addEventListener("click", function() {
+      winner = null
+      overlay.style.display = "none"
+      gameStarted = false
+      readyPlayers = { p1: false, p2: false }
+      // reload both iframes to restart the games
+      document.getElementById("game-p1").src = "game.html"
+      document.getElementById("game-p2").src = "game.html"
+      // show waiting overlays again
+      document.getElementById("wait-p1").style.display = "flex"
+      document.getElementById("wait-p2").style.display = "flex"
+      connectedPlayers = { p1: false, p2: false }
+    }, { once: true })
+  }
+
   connect()
+
+  window.addEventListener("message", function(event) {
+    if (!event.data || event.data.type !== "game_over") return
+
+    var p1Frame = document.getElementById("game-p1")
+    var p2Frame = document.getElementById("game-p2")
+
+    var loser = null
+    if (event.source === p1Frame.contentWindow) loser = "p1"
+    if (event.source === p2Frame.contentWindow) loser = "p2"
+    if (!loser || winner) return
+
+    winner = loser === "p1" ? "p2" : "p1"
+    var loserScore = event.data.finalScore || 0
+    showWinScreen(winner, loserScore)
+  })
+
+  function showWinScreen(player, loserScore) {
+    var overlay = document.getElementById("win-screen")
+    var title = document.getElementById("win-title")
+    var sub = document.getElementById("win-sub")
+    overlay.style.display = "flex"
+    if (player === "p1") {
+      title.textContent = "🟦 Player 1 Wins!"
+      title.style.color = "#4fc3f7"
+    } else {
+      title.textContent = "🟥 Player 2 Wins!"
+      title.style.color = "#ef5350"
+    }
+    sub.textContent = "Loser scored: " + (loserScore || 0)
+    overlay.addEventListener("click", function() {
+      winner = null
+      overlay.style.display = "none"
+      gameStarted = false
+      readyPlayers = { p1: false, p2: false }
+      connectedPlayers = { p1: false, p2: false }
+      document.getElementById("game-p1").src = "game.html"
+      document.getElementById("game-p2").src = "game.html"
+      document.getElementById("wait-p1").style.display = "flex"
+      document.getElementById("wait-p2").style.display = "flex"
+    }, { once: true })
+  }
   </script>
 
 </body>

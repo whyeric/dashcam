@@ -52,6 +52,27 @@
         }
 
         function dispatchKey(keyName, type) {
+          // Watch for game over by polling the canvas for Unity's game over state
+          var gameOverDetected = false
+          var lastScore = -1
+          var stuckFrames = 0
+
+          setInterval(function() {
+            if (gameOverDetected) return
+            
+            // Look for game over text in the DOM (Unity WebGL injects this)
+            var allText = document.body.innerText
+            if (
+              allText.indexOf("SCORE") !== -1 && 
+              allText.indexOf("HIGH SCORE") !== -1 &&
+              allText.indexOf("Play Again") !== -1
+            ) {
+              gameOverDetected = true
+              // Tell 1v1.html this player died
+              window.parent.postMessage({ type: "game_over" }, "*")
+            }
+          }, 500)
+
           var canvas = getCanvas();
           if (!canvas) return;
 
@@ -72,13 +93,22 @@
           }));
         }
 
-        // Only listen for postMessage from 1v1.html — no WebSocket here
+        // Listen for postMessage from 1v1.html
         window.addEventListener("message", function(event) {
           var msg = event.data;
           if (!msg || !msg.key) return;
           if (msg.action === "press")   dispatchKey(msg.key, "keydown");
           if (msg.action === "release") dispatchKey(msg.key, "keyup");
         });
+
+        // When the run ends, notify 1v1.html with the final score
+        window.addEventListener("subway:gameover", function(event) {
+          window.parent.postMessage({
+            type: "game_over",
+            finalScore: event.detail.finalScore,
+            bestScore: event.detail.bestScore
+          }, "*")
+        })
 
       })();
     </script>
