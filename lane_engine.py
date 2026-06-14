@@ -163,9 +163,9 @@ class Config:
     # Vertical gesture (jump / crouch) detection. All offsets/velocities are in
     # torso-lengths from the calibrated neutral chest height. Image-y increases
     # DOWNWARD, so a jump is a NEGATIVE offset/velocity and a crouch is POSITIVE.
-    jump_offset: float = -0.15            # chest this far up (torso-lengths) => jump
+    jump_offset: float = -0.18            # chest this far up (torso-lengths) => jump
     jump_vel: float = -0.85               # ...with at least this much upward speed (torso/s)
-    duck_offset: float = 0.35             # chest this far down => crouch
+    duck_offset: float = 0.28             # chest this far down => crouch
     duck_vel: float = 0.75                # ...with at least this much downward speed (torso/s)
     duck_hold_time: float = 0.06          # or just held below duck_offset this long (slow squat)
     gesture_cooldown: float = 0.25        # min gap between emitted gestures
