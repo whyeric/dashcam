@@ -12,7 +12,7 @@ import sys
 
 from lane_engine import (
     Config, Calibration, FeatureExtractor, LaneStateMachine, Landmark, State,
-    VerticalGestureDetector,
+    VerticalGestureDetector, RunDetector,
 )
 
 FPS = 60.0
@@ -417,6 +417,107 @@ def test_gesture_suppresses_lane():
     return check("no lane command while crouched", len(s.commands) == 0)
 
 
+# --------------------------------------------------------------------------- #
+# Running ("high knees") detection tests
+# --------------------------------------------------------------------------- #
+class RSim:
+    """Feeds 'jogging in place' landmark streams through FeatureExtractor +
+    RunDetector. The torso stays put; only the knees bob vertically. ``still``
+    holds the standing pose; ``jog`` oscillates both knees up toward the hip line
+    and back (a triangle wave, ``period`` frames per up-down cycle)."""
+
+    KNEE_STAND = 0.70    # matches make_lm's default knee_y
+    HIP_Y = 0.55         # matches make_lm's default hip_y (knees sit below the hips)
+
+    def __init__(self, calib=None, **cfg_over):
+        self.cfg = Config(invert_x=False, **cfg_over)
+        self.calib = calib or Calibration.default(self.cfg)
+        self.fx = FeatureExtractor(self.cfg)
+        self.det = RunDetector(self.cfg, self.calib)
+        self.t = 0.0
+        self.last = None
+
+    def feed(self, knee_y=0.70, conf=0.95):
+        f = self.fx.update(make_lm(0.45, 0.55, 0.50, knee_y=knee_y, conf=conf), self.t)
+        r = self.det.update(f, self.t)
+        self.last = r
+        self.t += DT
+        return r
+
+    def still(self, n, conf=0.95):
+        for _ in range(n):
+            self.feed(self.KNEE_STAND, conf)
+
+    def jog(self, n, lift=0.13, period=8, conf=0.95):
+        for i in range(n):
+            phase = (i % period) / period
+            tri = 1.0 - abs(2.0 * phase - 1.0)        # 0 (knees down) .. 1 (knees up)
+            self.feed(self.KNEE_STAND - lift * tri, conf)
+
+
+def test_run_idle_quiet():
+    print("test_run_idle_quiet")
+    r = RSim()
+    r.still(40)                                          # just stand there
+    ok = True
+    ok &= check("not running while standing still", r.last.is_running is False)
+    ok &= check("intensity near zero", r.last.intensity < r.cfg.run_intensity_on)
+    return ok
+
+
+def test_run_high_knees_detected():
+    print("test_run_high_knees_detected")
+    r = RSim()
+    r.still(10)
+    r.jog(40)                                            # sustained high knees
+    ok = True
+    ok &= check("is_running latches True during high knees", r.last.is_running is True)
+    ok &= check("intensity above on-threshold", r.last.intensity >= r.cfg.run_intensity_on)
+    return ok
+
+
+def test_run_stop_clears():
+    print("test_run_stop_clears")
+    r = RSim()
+    r.still(8)
+    r.jog(40)
+    was_running = r.last.is_running
+    r.still(60)                                          # stop: decay + keepalive elapse
+    ok = True
+    ok &= check("was running during the jog", was_running is True)
+    ok &= check("clears once stopped", r.last.is_running is False)
+    return ok
+
+
+def test_run_brief_dip_holds():
+    """A short lull mid-jog (a few standing frames) must NOT drop is_running:
+    hysteresis + the keepalive window hold it through the gap."""
+    print("test_run_brief_dip_holds")
+    r = RSim()
+    r.still(8)
+    r.jog(40)
+    held = r.last.is_running
+    r.still(5)                                           # brief dip, well under keepalive
+    mid = r.last.is_running
+    r.jog(10)
+    ok = True
+    ok &= check("running before the dip", held is True)
+    ok &= check("stays running across the brief dip", mid is True)
+    ok &= check("still running after resuming", r.last.is_running is True)
+    return ok
+
+
+def test_run_low_confidence_ignored():
+    print("test_run_low_confidence_ignored")
+    r = RSim()
+    r.still(10)                                          # confident standing baseline
+    r.jog(40, conf=0.2)                                  # vigorous motion, untrusted pose
+    ok = True
+    ok &= check("no running from low-confidence pose", r.last.is_running is False)
+    ok &= check("intensity stays near zero", r.last.intensity < r.cfg.run_intensity_on)
+    return ok
+
+
 def main():
     tests = [
         test_sidestep_right,
@@ -436,6 +537,11 @@ def main():
         test_gesture_low_confidence_ignored,
         test_gesture_indicator_holds_for_cooldown,
         test_gesture_suppresses_lane,
+        test_run_idle_quiet,
+        test_run_high_knees_detected,
+        test_run_stop_clears,
+        test_run_brief_dip_holds,
+        test_run_low_confidence_ignored,
     ]
     results = []
     for t in tests:

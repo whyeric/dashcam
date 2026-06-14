@@ -57,7 +57,7 @@ import numpy as np
 from lane_engine import (
     Config, Calibration, Calibrator, CalibrationPhase, FeatureExtractor,
     HybridLaneController, LaneStateMachine, PositionLaneController,
-    VerticalGestureDetector, Landmark, State,
+    VerticalGestureDetector, RunDetector, Landmark, State,
 )
 
 
@@ -299,11 +299,11 @@ class GamePhoneEmitter:
     re-syncs after any reconnect. Auto-reconnects and re-joins.
     """
 
-    def __init__(self, url: str, code: str, intensity: float = 1.0,
+    def __init__(self, url: str, code: str, intensity: float = 0.0,
                  heartbeat_sec: float = 0.15):
         self.url = url
         self.code = code
-        self.intensity = intensity
+        self.intensity = max(0.0, min(1.0, intensity))   # live running intensity (0..1)
         self.heartbeat = heartbeat_sec
         self._ws = None
         self._connected = False
@@ -373,9 +373,11 @@ class GamePhoneEmitter:
                     with self._lock:
                         lane = self._lane
                     await self._raw(ws, "phone:lane_position", {"lane": lane})
-                    if self.intensity > 0:
-                        await self._raw(ws, "phone:running_state",
-                                        {"intensity": self.intensity})
+                    # Always re-assert the live running intensity (0 included) so the
+                    # server's running flag tracks the detector and snaps off promptly
+                    # when the player stops, instead of waiting out RUNNING_TIMEOUT_MS.
+                    await self._raw(ws, "phone:running_state",
+                                    {"intensity": round(self.intensity, 3)})
             except Exception:
                 return                     # socket dead -> let _main reconnect
             await asyncio.sleep(self.heartbeat)
@@ -403,6 +405,10 @@ class GamePhoneEmitter:
             asyncio.run_coroutine_threadsafe(
                 self._send_now("phone:lane_position", {"lane": lane}), self._loop)
         return changed
+
+    def set_intensity(self, intensity: float) -> None:
+        """Set the live running intensity (0..1); sent on the next heartbeat."""
+        self.intensity = max(0.0, min(1.0, float(intensity)))
 
     def send(self, command: str) -> None:
         """Compatibility for older relative-command callers."""
@@ -439,7 +445,7 @@ class Visualizer:
         self.cfg = cfg
         self.trails = {"left": deque(maxlen=12), "right": deque(maxlen=12)}
 
-    def draw(self, frame, calib, features, decision, metrics, gesture=None):
+    def draw(self, frame, calib, features, decision, metrics, gesture=None, run=None):
         cfg = self.cfg
         if cfg.invert_x:
             frame = cv2.flip(frame, 1)
@@ -488,8 +494,28 @@ class Visualizer:
         # big JUMP/DUCK badge, held for the cooldown window after a gesture fires
         self._gesture_badge(frame, gesture, w, h)
 
-        self._panel(frame, calib, features, decision, metrics, gesture)
+        # running intensity bar + RUNNING/idle status (top-right)
+        self._run_hud(frame, run, w, h)
+
+        self._panel(frame, calib, features, decision, metrics, gesture, run)
         return frame
+
+    def _run_hud(self, frame, run, w, h):
+        """Top-right running meter: a bar that fills with intensity (0..1) and a
+        RUNNING / not-running label that turns green once is_running latches."""
+        if run is None:
+            return
+        running = self.COLORS["ok"]
+        idle = (130, 130, 130)
+        col = running if run.is_running else idle
+        bx, by, bw, bh = w - 170, 14, 150, 14
+        cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (60, 60, 60), -1)
+        cv2.rectangle(frame, (bx, by), (bx + int(bw * max(0.0, min(1.0, run.intensity))), by + bh),
+                      col, -1)
+        cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (200, 200, 200), 1)
+        label = "RUNNING" if run.is_running else "not running"
+        cv2.putText(frame, f"{label}  {run.intensity:.2f}", (bx, by + bh + 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, col, 1, cv2.LINE_AA)
 
     def _gesture_badge(self, frame, gesture, w, h):
         """Show the most recent one-shot gesture as a large centered banner for the
@@ -538,7 +564,7 @@ class Visualizer:
             col = self.COLORS["lead"] if fired else self.COLORS["chest"]
             cv2.circle(frame, (cx, cy), 7 if fired else 5, col, -1 if fired else 2)
 
-    def _panel(self, frame, calib, features, decision, metrics, gesture=None):
+    def _panel(self, frame, calib, features, decision, metrics, gesture=None, run=None):
         # tick = signal already clears its threshold; helps see why intent is "weak"
         vmark = "OK" if decision.lead_vx >= decision.vel_thr else "--"
         dmark = "OK" if decision.lead_disp >= decision.disp_thr else "--"
@@ -548,6 +574,11 @@ class Visualizer:
                     f"arm[{arm}] g:{gesture.reason}")
         else:
             vert = "vert: (no gesture detector)"
+        if run is not None:
+            run_line = (f"run: {'YES' if run.is_running else 'no '} i:{run.intensity:.2f} "
+                        f"knee:{run.knee_lift:.2f} leg:{run.leg_motion:.2f} bounce:{run.chest_bounce:.2f}")
+        else:
+            run_line = "run: (no detector)"
         lines = [
             f"mode: {decision.controller}   state: {decision.state.name}   lane: {decision.current_lane:+d}",
             f"lane out: {metrics['lane_out']:+d}   last: {metrics['last_output'] or '-'}   intent: {decision.intent_confidence:.2f}",
@@ -555,6 +586,7 @@ class Visualizer:
             f"vx: {decision.lead_vx:.2f}/{decision.vel_thr:.2f} {vmark}   "
             f"disp: {decision.lead_disp:+.3f}/{decision.disp_thr:.3f} {dmark}",
             vert,
+            run_line,
             f"last gesture: {metrics['last_gesture'] or '-'}   suppressed: {decision.suppressed}",
             f"FPS: {metrics['fps']:.1f}   cap->cmd: {metrics['last_latency_ms']:.0f} ms",
             f"infer: {metrics['infer_ms']:.1f} ms   classify: {metrics['classify_ms']:.2f} ms",
@@ -611,6 +643,7 @@ class App:
         self.calib: Optional[Calibration] = None
         self.sm: Optional[LaneStateMachine] = None
         self.gesture: Optional[VerticalGestureDetector] = None
+        self.run_detector: Optional[RunDetector] = None
         self._last_output_lane = 0
 
         self._fps = 0.0
@@ -618,6 +651,7 @@ class App:
         self._metrics = {
             "fps": 0.0, "last_latency_ms": 0.0, "infer_ms": 0.0, "classify_ms": 0.0,
             "lane_out": 0, "last_output": None, "last_gesture": None, "ws": False,
+            "intensity": 0.0, "running": False,
         }
 
         if args.load_calib:
@@ -639,6 +673,8 @@ class App:
             self.sm = PositionLaneController(self.cfg, self.calib)
         # Vertical jump/crouch detector shares the same calibration + features.
         self.gesture = VerticalGestureDetector(self.cfg, self.calib)
+        # Running ("high knees") intensity detector, same calibration + features.
+        self.run_detector = RunDetector(self.cfg, self.calib)
         self.calibrator = None
 
     def _output_lane(self, lane: int) -> bool:
@@ -676,6 +712,12 @@ class App:
         elif self.emitter is None:
             print(f"[gesture] {kind}  (t={time.perf_counter():.3f})")
 
+    def _output_intensity(self, intensity: float) -> None:
+        """Forward the live running intensity to the game (phone:running_state).
+        Only the game phone transport carries it; legacy taps have no analog."""
+        if isinstance(self.emitter, GamePhoneEmitter):
+            self.emitter.set_intensity(intensity)
+
     def run(self) -> None:
         win = f"pose_input - {self.args.mode} lanes"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
@@ -712,6 +754,7 @@ class App:
                     self.calibrator = Calibrator(self.cfg)
                     self.sm = None
                     self.gesture = None
+                    self.run_detector = None
                 if key == ord(" ") and self.calibrator is not None:
                     if self.calibrator.next_phase():
                         self.calib = self.calibrator.compute()
@@ -737,6 +780,7 @@ class App:
         t0 = time.perf_counter()
         decision = self.sm.update(features, cap_ts)
         gesture = self.gesture.update(features, cap_ts) if self.gesture else None
+        run = self.run_detector.update(features, cap_ts) if self.run_detector else None
         classify_ms = (time.perf_counter() - t0) * 1000.0
 
         self._metrics["fps"] = self._fps
@@ -750,8 +794,13 @@ class App:
                 self._output_event("jump")
             elif gesture.duck:
                 self._output_event("duck")
+        if run is not None:
+            self._output_intensity(run.intensity)
+            self._metrics["intensity"] = run.intensity
+            self._metrics["running"] = run.is_running
 
-        return self.viz.draw(frame, self.calib, features, decision, self._metrics, gesture)
+        return self.viz.draw(frame, self.calib, features, decision, self._metrics,
+                             gesture, run)
 
 
 def parse_args():
@@ -761,8 +810,9 @@ def parse_args():
     p.add_argument("--code", help="4-digit session code shown on the game display")
     p.add_argument("--game-url", default="ws://localhost:8080/ws",
                    help="Node game server phone endpoint")
-    p.add_argument("--intensity", type=float, default=1.0,
-                   help="running-intensity heartbeat sent to the game (0 disables)")
+    p.add_argument("--intensity", type=float, default=0.0,
+                   help="initial running intensity before detection kicks in; during "
+                        "play the high-knees RunDetector drives it live (0..1)")
     p.add_argument("--mode", choices=["hybrid", "position", "feet"], default="hybrid",
                    help="lane controller to use: hybrid is feet+body/default, position is body-only, feet is legacy")
     # Alternate transports.

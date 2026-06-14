@@ -172,6 +172,25 @@ class Config:
     jump_rearm_offset: float = -0.12      # offset must rise above this to re-arm jump
     duck_rearm_offset: float = 0.16       # offset must fall below this to re-arm crouch
 
+    # Running ("high knees") intensity detection. The three signals are normalized
+    # to torso-lengths (knee height) or torso-lengths/sec (cadence / bounce), so
+    # they are independent of body size and distance from the camera. intensity is
+    # the EMA-smoothed max of the three; is_running latches on above run_intensity_on
+    # and only clears below run_intensity_off (hysteresis), held for run_keepalive_sec
+    # so the natural lull between strides doesn't flicker it off. Mirrors the browser
+    # controller (server/public/poseController.js); tuned for webcam frame rates.
+    run_knee_lift_start: float = 0.70     # knee-drop (torso-lengths) at/above => no lift credit (knees low)
+    run_knee_lift_full: float = 0.30      # knee-drop at/below this => full lift credit (knee near hip)
+    run_leg_motion_start: float = 0.6     # vertical knee speed (torso/s) where running starts
+    run_leg_motion_full: float = 3.0      # vertical knee speed at full intensity
+    run_chest_bounce_start: float = 0.4   # torso vertical speed (torso/s) where bounce starts counting
+    run_chest_bounce_full: float = 2.5    # torso vertical speed at full bounce intensity
+    run_chest_bounce_weight: float = 0.75  # chest bounce contributes at most this fraction
+    run_intensity_alpha: float = 0.42     # EMA weight on each new raw-intensity sample
+    run_intensity_on: float = 0.30        # intensity must exceed this to set is_running
+    run_intensity_off: float = 0.17       # ...and fall below this to clear it (hysteresis)
+    run_keepalive_sec: float = 0.45       # hold is_running this long after intensity dips below off
+
     # Resting-position adaptation.
     rest_ema_alpha: float = 0.05
 
@@ -485,6 +504,9 @@ class Features:
     body_y: float = 0.0          # chest control point (0.65*shoulder + 0.35*hip), filtered
     body_vy: float = 0.0         # chest vertical velocity (height/s, + = down)
     body_y_conf: float = 0.0     # confidence backing body_y (0 => untrusted)
+    # knee vertical signals (image-y, down = +), for "high knees" run detection
+    knee_y: Dict[str, float] = field(default_factory=dict)    # {"left":y, "right":y}, smoothed
+    knee_vy: Dict[str, float] = field(default_factory=dict)   # {"left":vy, "right":vy}, height/s
 
 
 class FeatureExtractor:
@@ -503,6 +525,8 @@ class FeatureExtractor:
         self._foot_vy = {"left": self._mk_vel(), "right": self._mk_vel()}
         self._foot_src = {"left": None, "right": None}
         self._knee_vx = {"left": self._mk_vel(), "right": self._mk_vel()}
+        self._knee_y = {"left": EmaFilter(cfg.knee_ema_alpha), "right": EmaFilter(cfg.knee_ema_alpha)}
+        self._knee_vy = {"left": self._mk_vel(), "right": self._mk_vel()}
         self._hip_x = EmaFilter(cfg.hip_ema_alpha)
         self._hip_vx = self._mk_vel()
         self._hip_vy = self._mk_vel()
@@ -567,16 +591,24 @@ class FeatureExtractor:
                 conf=p.conf, source=src, reliable=reliable,
             )
 
-        knee_vx, knee_conf = {}, {}
+        knee_vx, knee_conf, knee_y, knee_vy = {}, {}, {}, {}
         for side in ("left", "right"):
             p = lm.get(f"{side}_knee")
             if p is not None and p.conf >= gate:
                 self._knee_vx[side].add(t, cfg.lat(p.x))      # raw for low-lag velocity
                 knee_vx[side] = self._knee_vx[side].velocity()
                 knee_conf[side] = p.conf
+                knee_y[side] = self._knee_y[side](p.y)        # smoothed: knee height / drop
+                self._knee_vy[side].add(t, p.y)               # raw: low-lag vertical velocity
+                knee_vy[side] = self._knee_vy[side].velocity()
             else:
                 knee_vx[side] = 0.0
                 knee_conf[side] = p.conf if p else 0.0
+                knee_y[side] = 0.0
+                knee_vy[side] = 0.0
+                # Drop-out: clear vertical state so a re-acquired knee doesn't spike.
+                self._knee_y[side].reset()
+                self._knee_vy[side].reset()
 
         hip_x, hip_conf, hip_y_raw = self._midpoint(lm, "hip", gate, bbox)
         body_x = self._body_x_value(lm, gate, hip_x, bbox)
@@ -612,6 +644,7 @@ class FeatureExtractor:
             hip_y=hip_y_raw if hip_y_raw is not None else 0.0,
             shoulder_y=shoulder_y_raw if shoulder_y_raw is not None else 0.0,
             body_y=body_yf, body_vy=body_vy, body_y_conf=body_y_conf,
+            knee_y=knee_y, knee_vy=knee_vy,
         )
 
     def _midpoint(self, lm, joint, gate, bbox):
@@ -789,6 +822,122 @@ class VerticalGestureDetector:
         return GestureDecision(jump, duck, offset, vel,
                                self._jump_armed, self._duck_armed, reason,
                                active, cd)
+
+
+# --------------------------------------------------------------------------- #
+# Running ("high knees") intensity detection
+# --------------------------------------------------------------------------- #
+@dataclass
+class RunDecision:
+    """Result of one RunDetector update (returned every frame)."""
+    intensity: float          # EMA-smoothed running intensity, 0..1
+    is_running: bool          # True while intensity is (or recently was) above threshold
+    knee_lift: float          # component: how high the higher knee is raised, 0..1
+    leg_motion: float         # component: vertical knee cadence, 0..1
+    chest_bounce: float       # component: torso bob, 0..1
+    reason: str               # short human label for debugging
+
+
+def _ramp(value: float, start: float, full: float) -> float:
+    """Linear 0..1 ramp: 0 at ``start``, 1 at ``full``, clamped outside the band.
+    Works in either direction (``full`` may be greater OR less than ``start``)."""
+    span = full - start
+    if abs(span) < 1e-9:
+        return 1.0 if value == start else (0.0 if (value < start) == (full < start) else 1.0)
+    return _clamp01((value - start) / span)
+
+
+def running_signals(cfg: "Config", calib: "Calibration", f: "Features"):
+    """The three raw 0..1 running components ``(knee_lift, leg_motion, chest_bounce)``
+    for one frame, all normalized to torso-lengths so they are body-size and distance
+    independent. Each component is 0 when the landmarks backing it are untrusted, so
+    a frame with no reliable lower body simply reads as 'not running'."""
+    th = max(calib.torso_height, 0.12)
+    gate = cfg.landmark_conf_min
+
+    # --- knee lift: how close the HIGHER knee is to the hip line ---
+    # drop = (knee_y - hip_y)/torso; small when a knee is raised toward the hip.
+    knee_lift = 0.0
+    if f.hip_conf >= gate:
+        drops = [(f.knee_y.get(s, 0.0) - f.hip_y) / th
+                 for s in ("left", "right") if f.knee_conf.get(s, 0.0) >= gate]
+        if drops:
+            knee_lift = _ramp(min(drops), cfg.run_knee_lift_start, cfg.run_knee_lift_full)
+
+    # --- leg motion: fastest vertical knee speed (the jogging cadence) ---
+    leg_motion = 0.0
+    knee_speeds = [abs(f.knee_vy.get(s, 0.0)) for s in ("left", "right")
+                   if f.knee_conf.get(s, 0.0) >= gate]
+    if knee_speeds:
+        leg_motion = _ramp(max(knee_speeds) / th,
+                           cfg.run_leg_motion_start, cfg.run_leg_motion_full)
+
+    # --- chest bounce: torso bob from the vertical-gesture control point ---
+    chest_bounce = 0.0
+    if f.body_y_conf >= gate:
+        chest_bounce = _ramp(abs(f.body_vy) / th,
+                             cfg.run_chest_bounce_start, cfg.run_chest_bounce_full)
+
+    return knee_lift, leg_motion, chest_bounce
+
+
+class RunDetector:
+    """Detects sustained 'high knees' jogging-in-place and reports it as a 0..1
+    ``intensity`` plus a latched ``is_running`` boolean.
+
+    Pure logic (no IO): feed the same ``Features`` the lane controllers use plus a
+    timestamp. Each frame's raw intensity is the max of three body-size-normalized
+    signals -- knee lift, vertical leg cadence, and torso bounce -- mirroring the
+    browser controller (server/public/poseController.js). The raw value is
+    EMA-smoothed so a single frame can't spike or drop it. ``is_running`` uses
+    hysteresis (turns on above ``run_intensity_on``, off below ``run_intensity_off``)
+    plus a short keepalive so the natural lull between strides does not flicker it.
+    """
+
+    def __init__(self, cfg: "Config", calib: "Calibration"):
+        self.cfg = cfg
+        self.calib = calib
+        self.intensity = 0.0
+        self._is_running = False
+        self._above_until = -1e9    # last time intensity was at/above run_intensity_off
+
+    def reset(self) -> None:
+        self.intensity = 0.0
+        self._is_running = False
+        self._above_until = -1e9
+
+    def update(self, f: "Features", now: float) -> RunDecision:
+        cfg = self.cfg
+        knee_lift, leg_motion, chest_bounce = running_signals(cfg, self.calib, f)
+        raw = max(knee_lift, leg_motion, cfg.run_chest_bounce_weight * chest_bounce)
+        a = cfg.run_intensity_alpha
+        self.intensity = (1.0 - a) * self.intensity + a * raw
+
+        if self.intensity >= cfg.run_intensity_off:
+            self._above_until = now            # still "active enough" -> reset keepalive
+
+        if self.intensity >= cfg.run_intensity_on:
+            self._is_running = True
+            reason = "running"
+        elif self.intensity < cfg.run_intensity_off:
+            # Below the floor: keep is_running alive briefly across a stride's dip.
+            if self._is_running and (now - self._above_until) > cfg.run_keepalive_sec:
+                self._is_running = False
+                reason = "stopped"
+            else:
+                reason = "keepalive" if self._is_running else "idle"
+        else:
+            # In the hysteresis band (off..on): hold the current latch.
+            reason = "hold-running" if self._is_running else "hold-idle"
+
+        return RunDecision(
+            intensity=self.intensity,
+            is_running=self._is_running,
+            knee_lift=knee_lift,
+            leg_motion=leg_motion,
+            chest_bounce=chest_bounce,
+            reason=reason,
+        )
 
 
 # --------------------------------------------------------------------------- #
