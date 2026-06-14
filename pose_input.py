@@ -237,14 +237,27 @@ class MediaPipePoseBackend:
 # Command emission to ws://localhost:8765 (input_server.py protocol)
 # --------------------------------------------------------------------------- #
 class WebSocketEmitter:
-    """Sends key taps ({"action":"press"/"release","key":...}) to the input
-    server from a background asyncio loop, with auto-reconnect."""
+    """Drives the standalone ``input_server.py`` relay (legacy tap protocol),
+    the transport used for the 1v1 camera-PC setup.
 
-    def __init__(self, url: str, tap_hold: float = 0.05):
+    Lane is sent as an ABSOLUTE position (``{"type":"lane","lane":-1|0|1,...}``)
+    and re-asserted on a timer, so a packet dropped on a flaky WiFi/hotspot link
+    self-corrects on the next resync instead of stranding the avatar one lane off
+    (the browser folds the absolute lane into relative left/right taps). One-shot
+    jump/duck stay fire-and-forget key taps. Runs on a background asyncio loop
+    with auto-reconnect; the current lane is re-asserted on every reconnect.
+    """
+
+    def __init__(self, url: str, tap_hold: float = 0.05, player: str = None,
+                 heartbeat_sec: float = 0.15):
         self.url = url
         self.tap_hold = tap_hold
+        self.player = player  # optional: "p1"/"p2" tag for 1v1 routing
+        self.heartbeat = heartbeat_sec
         self._ws = None
         self._connected = False
+        self._lane = 0
+        self._lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -252,6 +265,10 @@ class WebSocketEmitter:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def lane(self) -> int:
+        return self._lane
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -264,23 +281,73 @@ class WebSocketEmitter:
                 async with websockets.connect(self.url) as ws:
                     self._ws = ws
                     self._connected = True
-                    await ws.wait_closed()
+                    await self._send_lane(ws)          # resync on (re)connect
+                    hb = asyncio.ensure_future(self._heartbeat(ws))
+                    try:
+                        await ws.wait_closed()
+                    finally:
+                        hb.cancel()
             except Exception:
                 pass
             self._ws = None
             self._connected = False
             await asyncio.sleep(1.0)
 
+    async def _heartbeat(self, ws) -> None:
+        """Periodically re-assert the absolute lane so dropped packets heal."""
+        while True:
+            await asyncio.sleep(self.heartbeat)
+            try:
+                await self._send_lane(ws)
+            except Exception:
+                return                                 # socket dead -> reconnect
+
+    async def _send_lane(self, ws) -> None:
+        if ws is None:
+            return
+        with self._lock:
+            lane = self._lane
+        msg = {"type": "lane", "lane": lane}
+        if self.player:
+            msg["player"] = self.player
+        await ws.send(json.dumps(msg))
+
+    async def _send_lane_now(self) -> None:
+        try:
+            await self._send_lane(self._ws)
+        except Exception:
+            pass
+
     async def _tap(self, key: str) -> None:
         ws = self._ws
         if ws is None:
             return
         try:
-            await ws.send(json.dumps({"action": "press", "key": key}))
+            base = {"key": key}
+            if self.player:
+                base["player"] = self.player
+            await ws.send(json.dumps({"action": "press", **base}))
             await asyncio.sleep(self.tap_hold)
-            await ws.send(json.dumps({"action": "release", "key": key}))
+            await ws.send(json.dumps({"action": "release", **base}))
         except Exception:
             pass
+
+    # -- called from the main thread --------------------------------------- #
+    def set_lane(self, lane: int) -> bool:
+        """Set the authoritative absolute lane. Returns True when it changed."""
+        lane = max(-1, min(1, int(lane)))
+        with self._lock:
+            changed = lane != self._lane
+            self._lane = lane
+        if changed and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._send_lane_now(), self._loop)
+        return changed
+
+    def event(self, kind: str) -> None:
+        """One-shot jump/duck -> up/down key tap."""
+        key = {"jump": "up", "duck": "down"}.get(kind)
+        if key:
+            self.send(key)
 
     def send(self, key: str) -> None:
         if self._loop.is_running():
@@ -635,7 +702,7 @@ class App:
         if args.no_ws:
             self.emitter = None
         elif args.legacy_ws:
-            self.emitter = WebSocketEmitter(args.url)
+            self.emitter = WebSocketEmitter(args.url, player=args.player)
         else:
             self.emitter = GamePhoneEmitter(args.game_url, args.code, args.intensity)
 
@@ -683,32 +750,23 @@ class App:
         changed = lane != previous
         self._metrics["lane_out"] = lane
 
-        if isinstance(self.emitter, GamePhoneEmitter):
+        if isinstance(self.emitter, (GamePhoneEmitter, WebSocketEmitter)):
             changed = self.emitter.set_lane(lane)
-        elif isinstance(self.emitter, WebSocketEmitter):
-            delta = lane - previous
-            if delta:
-                key = "right" if delta > 0 else "left"
-                for _ in range(abs(delta)):
-                    self.emitter.send(key)
-                self._metrics["last_output"] = f"{previous:+d}->{lane:+d}"
         elif changed:
             print(f"[lane] {lane:+d}  (t={time.perf_counter():.3f})")
             self._metrics["last_output"] = f"{previous:+d}->{lane:+d}"
 
         if changed:
             self._last_output_lane = lane
-            if isinstance(self.emitter, GamePhoneEmitter):
+            if isinstance(self.emitter, (GamePhoneEmitter, WebSocketEmitter)):
                 self._metrics["last_output"] = f"lane {lane:+d}"
         return changed
 
     def _output_event(self, kind: str) -> None:
         """Emit a one-shot jump/duck gesture through the active transport."""
         self._metrics["last_gesture"] = kind
-        if isinstance(self.emitter, GamePhoneEmitter):
-            self.emitter.event(kind)                       # phone:jump / phone:duck
-        elif isinstance(self.emitter, WebSocketEmitter):
-            self.emitter.send("up" if kind == "jump" else "down")  # legacy key tap
+        if isinstance(self.emitter, (GamePhoneEmitter, WebSocketEmitter)):
+            self.emitter.event(kind)             # phone:jump/duck or up/down key tap
         elif self.emitter is None:
             print(f"[gesture] {kind}  (t={time.perf_counter():.3f})")
 
@@ -820,6 +878,8 @@ def parse_args():
                    help="use the standalone input_server.py tap protocol instead")
     p.add_argument("--url", default="ws://localhost:8765",
                    help="input_server.py ws url (legacy tap mode)")
+    p.add_argument("--player", choices=["p1", "p2"],
+                   help="tag taps with this player id for 1v1 routing (legacy tap mode)")
     p.add_argument("--no-ws", action="store_true", help="print commands instead of sending")
     # Common.
     p.add_argument("--no-mirror", action="store_true", help="disable mirrored preview/axis")

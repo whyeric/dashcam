@@ -35,7 +35,6 @@
       (function () {
         // ── Key mapping: controller command → Unity key code ──────────────
         // Subway Surfers uses standard arrow keys / WASD + Space for jump.
-        // Add or modify entries here to match your controller's protocol.
         var KEY_MAP = {
           left:      37,
           up:        38,
@@ -49,7 +48,14 @@
           s:         83,
         };
 
-        var WS_URL       = "ws://localhost:8765";
+        // ── 1v1 wiring ────────────────────────────────────────────────────
+        // This panel reads its player + relay URL from the query string:
+        //   game.html?player=p1&ws=ws://localhost:8765
+        // It dispatches a tap only when the tap is for this player (or when the
+        // tap carries no player tag at all, preserving solo behaviour).
+        var params    = new URLSearchParams(location.search);
+        var MY_PLAYER = params.get("player");                 // "p1" | "p2" | null
+        var WS_URL    = params.get("ws") || "ws://localhost:8765";
         var RECONNECT_MS = 3000;
 
         function getCanvas() {
@@ -80,10 +86,10 @@
         }
 
         // ── Absolute-lane handling (WiFi-robust) ──────────────────────────
-        // The camera PC streams an ABSOLUTE lane (-1|0|1) re-asserted on a timer,
-        // so a dropped packet self-corrects on the next resync instead of leaving
-        // the avatar one lane off. Track the lane already applied and dispatch
-        // only the delta as left/right taps.
+        // Camera PCs stream an ABSOLUTE lane (-1|0|1) re-asserted on a timer, so
+        // a packet dropped on the hotspot link self-corrects on the next resync
+        // instead of leaving the avatar one lane off. We track the lane already
+        // steered to and dispatch only the delta as left/right taps.
         var appliedLane = 0;
 
         function tapKey(keyName) {
@@ -99,21 +105,23 @@
           appliedLane = lane;
         }
 
-        function connect() { // TODO: client to be changed
+        function connect() {
           var ws = new WebSocket(WS_URL);
 
           ws.onopen = function () {
-            console.log("[input-bridge] Connected to", WS_URL);
+            console.log("[input-bridge] Connected to", WS_URL,
+                        MY_PLAYER ? "as " + MY_PLAYER : "(solo)");
           };
 
           ws.onmessage = function (event) {
             try {
               var msg = JSON.parse(event.data);
+              // Ignore input tagged for the other player; untagged passes through.
+              if (MY_PLAYER && msg.player && msg.player !== MY_PLAYER) return;
               if (msg.type === "lane") { applyLane(msg.lane); return; }
               if (msg.action === "press")   dispatchKey(msg.key, "keydown");
               if (msg.action === "release") dispatchKey(msg.key, "keyup");
             } catch (e) {
-              // might be better to treat as a raw string in key press
               var raw = event.data.trim().toLowerCase();
               if (KEY_MAP[raw]) dispatchKey(raw, "keydown");
             }
@@ -125,7 +133,7 @@
           };
 
           ws.onerror = function () {
-            ws.close(); 
+            ws.close();
           };
         }
 
@@ -134,11 +142,10 @@
           if (canvas && window.unityGame) {
             connect();
           } else {
-            setTimeout(waitForCanvas, 100); // sketchy as hell
+            setTimeout(waitForCanvas, 100);
           }
         }
 
-        // also listen for the Unity runtime init event
         if (window.unityGame && window.unityGame.Module) {
           connect();
         } else {

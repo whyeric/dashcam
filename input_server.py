@@ -21,6 +21,22 @@ async def handler(websocket):
         async for message in websocket:
             try:
                 data = json.loads(message)
+                player = data.get("player")  # optional: "p1"/"p2" for 1v1 routing
+
+                # Absolute-lane message (WiFi-robust): the camera PC re-asserts an
+                # absolute lane (-1|0|1) on a timer so a dropped packet self-heals.
+                # Pass it straight through; the browser folds it into left/right taps.
+                if data.get("type") == "lane":
+                    lane = data.get("lane")
+                    if lane not in (-1, 0, 1):
+                        print(f"[server] Invalid lane: {lane!r}")
+                        continue
+                    out = {"type": "lane", "lane": lane}
+                    if player:
+                        out["player"] = player
+                    websockets.broadcast(clients - {websocket}, json.dumps(out))
+                    continue
+
                 action = data.get("action", "").lower()
                 key = data.get("key", "").lower()
 
@@ -32,9 +48,12 @@ async def handler(websocket):
                     print(f"[server] Unknown key: {key}")
                     continue
 
-                # Broadcast to all connected game clients
-                payload = json.dumps({"action": action, "key": key})
-                websockets.broadcast(clients - {websocket}, payload)
+                # Broadcast to all connected game clients. The player tag (if any)
+                # is passed through so each game panel can filter to its own player.
+                out = {"action": action, "key": key}
+                if player:
+                    out["player"] = player
+                websockets.broadcast(clients - {websocket}, json.dumps(out))
 
             except json.JSONDecodeError:
                 # Accept raw key name as convenience (e.g. "left" -> press)
@@ -53,7 +72,7 @@ async def handler(websocket):
 
 
 async def main():
-    host = "localhost"
+    host = "0.0.0.0"  # bind all interfaces so remote camera PCs can connect (1v1)
     port = 8765
 
     print(f"[server] Starting WebSocket server on ws://{host}:{port}")
