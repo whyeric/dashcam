@@ -58,6 +58,26 @@
         var WS_URL    = params.get("ws") || "ws://localhost:8765";
         var RECONNECT_MS = 3000;
 
+        function postBridgeEvent(type, detail) {
+          if (window.parent === window) return;
+          var targetOrigin = location.origin && location.origin !== "null" ? location.origin : "*";
+          window.parent.postMessage({
+            source: "subway-game",
+            type: type,
+            player: MY_PLAYER,
+            phase: detail && detail.phase,
+            detail: detail || {},
+          }, targetOrigin);
+        }
+
+        window.addEventListener("subway:phase", function (event) {
+          postBridgeEvent("subway:phase", event.detail);
+        });
+
+        window.addEventListener("subway:gameover", function (event) {
+          postBridgeEvent("subway:gameover", event.detail);
+        });
+
         function getCanvas() {
           return document.querySelector("#game canvas")
               || document.querySelector("canvas");
