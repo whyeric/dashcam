@@ -79,6 +79,36 @@
       #ws-hud .ws-ev-duck { color: #d2a8ff; }
       #ws-hud .ws-ev-key { color: #a5d6ff; }
       #ws-hud .ws-status { margin-top: 8px; font-size: 10px; color: #6e7681; }
+
+      /* ── "keep running or die" warning. Full-viewport red flash with a
+         countdown; translucent so the game stays visible, pointer-events:none so
+         it never blocks the canvas. Shown only while the player has stopped. ── */
+      #ws-warn {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646; /* just under the HUD */
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        pointer-events: none;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        background: rgba(170, 20, 20, 0.18);
+        box-shadow: inset 0 0 0 8px rgba(248, 81, 73, 0.92);
+        animation: ws-warn-pulse 0.7s ease-in-out infinite;
+      }
+      #ws-warn.show { display: flex; }
+      #ws-warn .ws-warn-title {
+        font-size: 64px; font-weight: 900; letter-spacing: 4px; color: #ff5c4d;
+        text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
+      }
+      #ws-warn .ws-warn-sub { margin-top: 10px; font-size: 22px; color: #ffd7d3; }
+      #ws-warn .ws-warn-count {
+        margin-top: 16px; font-size: 120px; font-weight: 900; line-height: 1; color: #fff;
+        text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7);
+      }
+      @keyframes ws-warn-pulse { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
     </style>
   </head>
   <body>
@@ -104,6 +134,13 @@
         <div class="ws-events" id="ws-events"></div>
         <div class="ws-status" id="ws-status">connecting…</div>
       </div>
+    </div>
+
+    <!-- ── "Keep running!" warning overlay (hidden until the player stops). ──── -->
+    <div id="ws-warn">
+      <div class="ws-warn-title">KEEP RUNNING!</div>
+      <div class="ws-warn-sub">High knees — or you crash</div>
+      <div class="ws-warn-count" id="ws-warn-count">3</div>
     </div>
 
     <!-- Unity loader (builds #game-container / #game / canvas itself and mounts
@@ -181,6 +218,108 @@
         }, TAP_GAP_MS);
       }
 
+      // ── "Keep running or die" enforcement ────────────────────────────────────
+      // The pose engine reports running via input:state. While a run is ACTIVELY in
+      // progress, if the player stops we flash a 3s warning on the emulator; if they
+      // STILL aren't running when it elapses, we spam ← taps to run the avatar off
+      // the track (a kill). Taps go through the same spaced enqueueTaps() the lane
+      // logic uses, so none get dropped.
+      //
+      // "actively playing" comes from the Poki SDK gameplay callbacks the Unity
+      // build fires (gameplayStart/Stop, roundStart/End), so the timer never runs on
+      // the main menu, the loading screen, or the game-over screen.
+      const RUN_WARN_MS = 3000; // grace period before the kill
+      const KILL_LEFT_TAPS = 5; // ← taps sent to crash the avatar
+      let phoneConnected = false;
+      let gamePlaying = false; // true only between gameplayStart and gameplayStop
+      let runEnforce = "idle"; // "idle" | "warning" | "killed"
+      let warnStartedAt = 0;
+
+      function showWarning(remainingMs) {
+        $("ws-warn").classList.add("show");
+        $("ws-warn-count").textContent = Math.max(1, Math.ceil(remainingMs / 1000));
+      }
+      function resetRunEnforcement() {
+        runEnforce = "idle";
+        warnStartedAt = 0;
+        $("ws-warn").classList.remove("show");
+      }
+
+      function enforceRunning(running) {
+        // Only enforce during an active run, with a phone paired.
+        if (!gamePlaying || !phoneConnected) {
+          resetRunEnforcement();
+          return;
+        }
+        if (running) {
+          if (runEnforce !== "idle") resetRunEnforcement(); // resumed -> all clear
+          return;
+        }
+        // Not running mid-run -> warn, then kill once the grace elapses.
+        const t = Date.now();
+        if (runEnforce === "idle") {
+          runEnforce = "warning";
+          warnStartedAt = t;
+        }
+        if (runEnforce === "warning") {
+          const remaining = RUN_WARN_MS - (t - warnStartedAt);
+          if (remaining > 0) {
+            showWarning(remaining);
+          } else {
+            resetRunEnforcement();
+            runEnforce = "killed"; // one kill per stop; clears when the run ends/resumes
+            if (inputReady()) enqueueTaps(Array(KILL_LEFT_TAPS).fill("left"));
+            $("ws-status").textContent = "not running — sent " + KILL_LEFT_TAPS + " ← (kill)";
+          }
+        }
+        // "killed": wait until the run ends (gameplayStop) or running resumes.
+      }
+
+      // Track whether a run is actually in progress via the Poki SDK gameplay
+      // callbacks the game fires (mirrors subway-bridge.js): gameplayStart /
+      // roundStart -> playing; gameplayStop / roundEnd -> not playing.
+      function setGamePlaying(on) {
+        if (gamePlaying === on) return;
+        gamePlaying = on;
+        if (!on) resetRunEnforcement(); // leaving play clears any pending warning
+        $("ws-status").textContent = on ? "run started" : "run ended";
+      }
+      function wrapPokiGameplay(sdk) {
+        if (!sdk) return sdk;
+        [
+          ["gameplayStart", true],
+          ["roundStart", true],
+          ["gameplayStop", false],
+          ["roundEnd", false],
+        ].forEach(([name, on]) => {
+          const orig = sdk[name];
+          if (typeof orig !== "function" || orig.__wsRunWrapped) return;
+          const wrapped = function () {
+            setGamePlaying(on);
+            return orig.apply(this, arguments);
+          };
+          wrapped.__wsRunWrapped = true;
+          sdk[name] = wrapped;
+        });
+        return sdk;
+      }
+      (function installPokiGameplayHook() {
+        let val = window.PokiSDK;
+        const d = Object.getOwnPropertyDescriptor(window, "PokiSDK");
+        if (!d || d.configurable) {
+          Object.defineProperty(window, "PokiSDK", {
+            configurable: true,
+            enumerable: true,
+            get() { return val; },
+            set(next) { val = wrapPokiGameplay(next); },
+          });
+        }
+        wrapPokiGameplay(val);
+        // Re-wrap periodically: the real SDK can replace window.PokiSDK or add these
+        // methods after this runs, and gameplay calls only happen much later anyway.
+        setInterval(() => wrapPokiGameplay(window.PokiSDK), 1000);
+      })();
+
       // ── WebSocket: the display side of the contract (PLAN/README) ────────────
       function connect() {
         ws = new WebSocket(wsUrl);
@@ -194,6 +333,8 @@
         ws.addEventListener("close", () => {
           setPill("ws-socket", false, "closed");
           setPill("ws-phone", false, "disconnected");
+          phoneConnected = false;
+          resetRunEnforcement();
           $("ws-status").textContent = "socket closed — reconnecting in 1s…";
           setTimeout(connect, 1000);
         });
@@ -226,11 +367,14 @@
             $("ws-status").textContent = "session " + msg.data.sessionCode + " — pair a phone";
             break;
           case "phone:status":
+            phoneConnected = !!msg.data.connected;
             setPill("ws-phone", msg.data.connected, msg.data.connected ? "connected" : "disconnected");
             $("ws-status").textContent = msg.data.connected ? "phone paired ✓" : "phone left — runner will stop";
+            if (!phoneConnected) resetRunEnforcement();
             break;
           case "input:state":
             renderState(msg.data);
+            enforceRunning(!!msg.data.running); // 3s warning -> ← kill if still stopped
             // lane is absolute; emu turns the delta into relative ←/→ taps.
             if (inputReady()) enqueueTaps(emu.onState(msg.data));
             break;
