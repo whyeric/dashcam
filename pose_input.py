@@ -2,8 +2,8 @@
 
 This is the IO half of the system (the decision logic lives in ``lane_engine.py``).
 It captures the webcam on a latest-frame-only thread, runs a pose model, feeds the
-landmarks through the lane engine, draws a debug overlay, and emits "left"/"right"
-to the repo's existing input server.
+landmarks through the lane engine, draws a debug overlay, and emits an absolute
+lane state to the repo's existing game server.
 
 Integration with the repo
 --------------------------
@@ -13,8 +13,8 @@ session and shows a 4-digit code, a PHONE joins with that code, and the phone th
 streams an ABSOLUTE lane position (``phone:lane_position {lane: -1|0|1}``). The
 display folds that absolute lane into relative arrow-key taps for the Unity
 emulator (see ``server/public/emulatorInput.js``). This controller acts as that
-phone (GamePhoneEmitter): it joins the session and streams lane state, mapping the
-engine's early "left"/"right" intent onto the absolute lane. The data path is:
+phone (GamePhoneEmitter): it joins the session and streams lane state. The data
+path is:
 
     webcam -> pose_input.py --(phone:lane_position)--> server/index.js (:8080/ws)
                                                        -> display -> Unity game
@@ -31,7 +31,7 @@ Run (game integration)
 
 Other modes
 -----------
-    python pose_input.py --no-ws           # print intent commands, don't send
+    python pose_input.py --no-ws           # print lane state, don't send
     python pose_input.py --legacy-ws       # tap protocol -> input_server.py (:8765)
     python pose_input.py --code 1234 --load-calib calib.json   # reuse calibration
     python pose_input.py --code 1234 --skip-calibration        # neutral geometry
@@ -56,7 +56,7 @@ import numpy as np
 
 from lane_engine import (
     Config, Calibration, Calibrator, CalibrationPhase, FeatureExtractor,
-    LaneStateMachine, PositionLaneController, Landmark, State,
+    HybridLaneController, LaneStateMachine, PositionLaneController, Landmark, State,
 )
 
 
@@ -74,10 +74,11 @@ class ThreadedCamera:
         self.cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
             self.cap = cv2.VideoCapture(index)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self.cap.set(cv2.CAP_PROP_FPS, 60)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FPS, 60)
         if not self.cap.isOpened():
             raise RuntimeError(f"could not open camera index {index}")
 
@@ -292,14 +293,9 @@ class GamePhoneEmitter:
     """Drives the Node game server (``server/``) as a phone client.
 
     The game is session-based (see this module's docstring): we JOIN with the
-    display's 4-digit code, then stream ABSOLUTE lane state. The engine emits
-    early "left"/"right" intent commands; we fold those into an absolute lane
-    (-1/0/1, clamped) and push ``phone:lane_position`` immediately for low latency,
-    re-asserting it (plus an optional running heartbeat) on a timer so the server
-    holds the value and re-syncs after any reconnect. Auto-reconnects and re-joins.
-
-    Pair this with ``Config.resync_on_cancel = True`` so an aborted step emits the
-    opposite intent and the absolute lane stays in sync with the player.
+    display's 4-digit code, then stream ABSOLUTE lane state (-1/0/1, clamped).
+    The latest lane is re-asserted on a timer so the server holds the value and
+    re-syncs after any reconnect. Auto-reconnects and re-joins.
     """
 
     def __init__(self, url: str, code: str, intensity: float = 1.0,
@@ -396,19 +392,23 @@ class GamePhoneEmitter:
                 pass
 
     # -- called from the main thread --------------------------------------- #
-    def send(self, command: str) -> None:
-        """Fold an engine intent ("left"/"right") into the absolute lane."""
+    def set_lane(self, lane: int) -> bool:
+        """Set the authoritative absolute lane. Returns True when it changed."""
+        lane = max(-1, min(1, int(lane)))
         with self._lock:
-            if command == "left":
-                self._lane = max(-1, self._lane - 1)
-            elif command == "right":
-                self._lane = min(1, self._lane + 1)
-            else:
-                return
-            lane = self._lane
-        if self._loop.is_running():
+            changed = lane != self._lane
+            self._lane = lane
+        if changed and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(
                 self._send_now("phone:lane_position", {"lane": lane}), self._loop)
+        return changed
+
+    def send(self, command: str) -> None:
+        """Compatibility for older relative-command callers."""
+        if command == "left":
+            self.set_lane(self.lane - 1)
+        elif command == "right":
+            self.set_lane(self.lane + 1)
 
     def event(self, kind: str) -> None:
         """One-shot jump/duck -> phone:jump / phone:duck."""
@@ -487,8 +487,8 @@ class Visualizer:
         vmark = "OK" if decision.lead_vx >= decision.vel_thr else "--"
         dmark = "OK" if decision.lead_disp >= decision.disp_thr else "--"
         lines = [
-            f"state: {decision.state.name}   lane: {decision.current_lane:+d}",
-            f"last cmd: {metrics['last_command'] or '-'}   intent: {decision.intent_confidence:.2f}",
+            f"mode: {decision.controller}   state: {decision.state.name}   lane: {decision.current_lane:+d}",
+            f"lane out: {metrics['lane_out']:+d}   last: {metrics['last_output'] or '-'}   intent: {decision.intent_confidence:.2f}",
             f"lead foot: {decision.leading_foot or '-'}   reason: {decision.reason}",
             f"vx: {decision.lead_vx:.2f}/{decision.vel_thr:.2f} {vmark}   "
             f"disp: {decision.lead_disp:+.3f}/{decision.disp_thr:.3f} {dmark}",
@@ -542,20 +542,18 @@ class App:
         elif args.legacy_ws:
             self.emitter = WebSocketEmitter(args.url)
         else:
-            # Game mode streams absolute lane state; an aborted step must emit the
-            # opposite intent so the avatar's lane stays synced with the player.
-            self.cfg.resync_on_cancel = True
             self.emitter = GamePhoneEmitter(args.game_url, args.code, args.intensity)
 
         self.calibrator: Optional[Calibrator] = None
         self.calib: Optional[Calibration] = None
         self.sm: Optional[LaneStateMachine] = None
+        self._last_output_lane = 0
 
         self._fps = 0.0
         self._last_frame_ts = 0.0
         self._metrics = {
             "fps": 0.0, "last_latency_ms": 0.0, "infer_ms": 0.0, "classify_ms": 0.0,
-            "last_command": None, "ws": False,
+            "lane_out": 0, "last_output": None, "ws": False,
         }
 
         if args.load_calib:
@@ -568,21 +566,41 @@ class App:
             self.calibrator = Calibrator(self.cfg)
 
     def _start_play(self) -> None:
-        if self.args.mode == "feet":
-            self.sm = LaneStateMachine(self.cfg, self.calib, emit=self._emit)
+        if self.args.mode == "hybrid":
+            self.sm = HybridLaneController(self.cfg, self.calib)
+        elif self.args.mode == "feet":
+            self.sm = LaneStateMachine(self.cfg, self.calib)
         else:
-            self.sm = PositionLaneController(self.cfg, self.calib, emit=self._emit)
+            self.sm = PositionLaneController(self.cfg, self.calib)
         self.calibrator = None
 
-    def _emit(self, command: str) -> None:
-        self._metrics["last_command"] = command
-        if self.emitter is not None:
-            self.emitter.send(command)
-        else:
-            print(f"[lane] {command}  (t={time.perf_counter():.3f})")
+    def _output_lane(self, lane: int) -> bool:
+        lane = max(-1, min(1, int(lane)))
+        previous = self._last_output_lane
+        changed = lane != previous
+        self._metrics["lane_out"] = lane
+
+        if isinstance(self.emitter, GamePhoneEmitter):
+            changed = self.emitter.set_lane(lane)
+        elif isinstance(self.emitter, WebSocketEmitter):
+            delta = lane - previous
+            if delta:
+                key = "right" if delta > 0 else "left"
+                for _ in range(abs(delta)):
+                    self.emitter.send(key)
+                self._metrics["last_output"] = f"{previous:+d}->{lane:+d}"
+        elif changed:
+            print(f"[lane] {lane:+d}  (t={time.perf_counter():.3f})")
+            self._metrics["last_output"] = f"{previous:+d}->{lane:+d}"
+
+        if changed:
+            self._last_output_lane = lane
+            if isinstance(self.emitter, GamePhoneEmitter):
+                self._metrics["last_output"] = f"lane {lane:+d}"
+        return changed
 
     def run(self) -> None:
-        win = "pose_input - feet-intent lanes"
+        win = f"pose_input - {self.args.mode} lanes"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
         try:
             while True:
@@ -646,14 +664,14 @@ class App:
         self._metrics["infer_ms"] = infer_ms
         self._metrics["classify_ms"] = classify_ms
         self._metrics["ws"] = bool(self.emitter and self.emitter.connected)
-        if decision.command is not None:
+        if self._output_lane(decision.current_lane):
             self._metrics["last_latency_ms"] = (time.perf_counter() - cap_ts) * 1000.0
 
         return self.viz.draw(frame, self.calib, features, decision, self._metrics)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Feet-intent lane controller")
+    p = argparse.ArgumentParser(description="Pose lane-state controller")
     p.add_argument("--camera", type=int, default=0, help="camera index")
     # Game mode (default): act as a phone for the Node server in server/.
     p.add_argument("--code", help="4-digit session code shown on the game display")
@@ -661,6 +679,8 @@ def parse_args():
                    help="Node game server phone endpoint")
     p.add_argument("--intensity", type=float, default=1.0,
                    help="running-intensity heartbeat sent to the game (0 disables)")
+    p.add_argument("--mode", choices=["hybrid", "position", "feet"], default="hybrid",
+                   help="lane controller to use: hybrid is feet+body/default, position is body-only, feet is legacy")
     # Alternate transports.
     p.add_argument("--legacy-ws", action="store_true",
                    help="use the standalone input_server.py tap protocol instead")
@@ -669,7 +689,8 @@ def parse_args():
     p.add_argument("--no-ws", action="store_true", help="print commands instead of sending")
     # Common.
     p.add_argument("--no-mirror", action="store_true", help="disable mirrored preview/axis")
-    p.add_argument("--model-complexity", type=int, default=1, choices=[0, 1, 2])
+    p.add_argument("--model-complexity", type=int, default=0, choices=[0, 1, 2],
+                   help="MediaPipe model: 0 is lowest latency, 1/2 trade speed for accuracy")
     p.add_argument("--load-calib", help="load calibration json and skip calibration")
     p.add_argument("--save-calib", help="save calibration json after calibrating")
     p.add_argument("--skip-calibration", action="store_true",

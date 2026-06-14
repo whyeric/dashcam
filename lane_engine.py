@@ -119,7 +119,31 @@ class Config:
     hip_vel_threshold: float = 0.18
     horiz_dominance: float = 1.0          # |vx| > this*|vy| (reject vertical motion)
     confirm_time: float = 0.025           # intent must persist this long (debounce)
-    rearm_time: float = 0.150             # min gap between emitted commands
+    rearm_time: float = 0.110             # min gap between emitted commands
+
+    # Hybrid lane detector: feet are predicted slightly forward for low-latency
+    # intent, while body/COM confirms and recent lane state gives mild hysteresis.
+    hybrid_foot_prediction_sec: float = 0.11
+    hybrid_enter_score: float = 1.08
+    hybrid_center_score: float = 1.05
+    hybrid_fast_foot_score: float = 1.35
+    hybrid_body_score: float = 0.85
+    hybrid_both_feet_score: float = 1.25
+    hybrid_one_foot_score: float = 0.38
+    hybrid_velocity_score: float = 0.34
+    hybrid_hold_score: float = 0.28
+    hybrid_lead_lock_sec: float = 0.34
+    hybrid_lead_display_sec: float = 0.24
+    hybrid_trail_ignore_sec: float = 0.42
+    hybrid_spent_lead_sec: float = 0.58
+    hybrid_center_settle_sec: float = 0.28
+    hybrid_confirmation_hold_sec: float = 0.34
+    hybrid_body_shift_ratio: float = 0.12
+    hybrid_body_velocity_ratio: float = 0.55
+    hybrid_com_shift_ratio: float = 0.08
+    hybrid_com_velocity_ratio: float = 0.30
+    hybrid_center_return_shift_ratio: float = 0.24
+    hybrid_center_return_velocity_ratio: float = 0.38
 
     # Confirmation / occupancy.
     confirm_radius: float = 0.050         # hip within this of a lane center => there
@@ -139,8 +163,8 @@ class Config:
     rest_ema_alpha: float = 0.05
 
     # Camera resolution (passed to ThreadedCamera; pose model ignores this).
-    frame_width: int = 1280
-    frame_height: int = 720
+    frame_width: int = 960
+    frame_height: int = 540
 
     def lat(self, x: float) -> float:
         """Raw normalized x -> lateral axis (+ = player's right / positive lane)."""
@@ -596,7 +620,7 @@ class State(Enum):
 @dataclass
 class Decision:
     """Result of one state-machine update (returned every frame)."""
-    command: Optional[str]          # "left" | "right" | None
+    command: Optional[str]          # legacy "left" | "right" | None
     state: State
     current_lane: int
     leading_foot: Optional[str]
@@ -608,8 +632,8 @@ class Decision:
     lead_disp: float = 0.0         # lead-foot signed displacement from rest
     vel_thr: float = 0.0           # current velocity threshold
     disp_thr: float = 0.0          # current displacement threshold
-    controller: str = "feet"       # which controller produced this ("feet"|"position")
-    body_x: float = 0.0            # tracked lateral body position (position mode)
+    controller: str = "feet"       # which controller produced this
+    body_x: float = 0.0            # tracked lateral body position
 
 
 _LANE_TO_STABLE = {-1: State.STABLE_LEFT, 0: State.STABLE_CENTER, 1: State.STABLE_RIGHT}
@@ -859,19 +883,658 @@ class LaneStateMachine:
         return "moving"
 
 
+class HybridLaneController:
+    """Hybrid feet + body lane detector.
+
+    The fast path predicts both feet a short time forward and scores the side
+    they are moving into. The stable path scores the body/hip lane and both-foot
+    agreement. This avoids the old feet controller's per-frame lead-foot latch,
+    which could get stuck left or flip between legs during rightward movement.
+    """
+
+    def __init__(self, cfg: Config, calib: Calibration):
+        self.cfg = cfg
+        self.calib = calib
+
+        self.state = State.STABLE_CENTER
+        self.current_lane = 0
+        self.last_lane_change_t: float = -1e9
+        self.intent_confidence: float = 0.0
+        self._airborne_until = 0.0
+        self._lead_lock_side: Optional[str] = None
+        self._lead_lock_direction = 0
+        self._lead_lock_until = -1e9
+        self._display_lead_side: Optional[str] = None
+        self._display_lead_until = -1e9
+        self._trail_ignore_side: Optional[str] = None
+        self._trail_ignore_direction = 0
+        self._trail_ignore_until = -1e9
+        self._spent_lead_side: Optional[str] = None
+        self._spent_lead_direction = 0
+        self._spent_lead_until = -1e9
+        self._center_settle_direction = 0
+        self._center_settle_until = -1e9
+        self._confirm_lane: Optional[int] = None
+        self._confirm_until = -1e9
+
+    def _body_x(self, f: Features) -> float:
+        return f.hip_x if f.hip_conf >= self.cfg.landmark_conf_min else f.body_x
+
+    def _suppressed(self, f: Features, now: float) -> bool:
+        cfg = self.cfg
+        airborne = (f.hip_vy < -cfg.jump_vy_threshold or
+                    (f.left.vy < -cfg.ankle_jump_vy_threshold and
+                     f.right.vy < -cfg.ankle_jump_vy_threshold))
+        if airborne:
+            self._airborne_until = now + cfg.land_refractory
+        ducking = (self.calib.torso_height > 0 and f.torso_height > 0 and
+                   f.torso_height < cfg.duck_ratio * self.calib.torso_height)
+        return now < self._airborne_until or ducking
+
+    def _region(self, x: float) -> int:
+        b0, b1 = self.calib.boundaries
+        if x < b0:
+            return -1
+        if x > b1:
+            return 1
+        return 0
+
+    def _velocity_side(self, vx: float) -> int:
+        deadzone = max(0.06, 0.35 * self.calib.vel_threshold)
+        if abs(vx) <= deadzone:
+            return 0
+        return 1 if vx > 0 else -1
+
+    def _foot_prediction(self, foot: FootFeature) -> float:
+        return max(0.0, min(1.0, foot.x + foot.vx * self.cfg.hybrid_foot_prediction_sec))
+
+    def _foot_active(self, foot: FootFeature) -> bool:
+        return foot.source != "none" and foot.conf >= self.cfg.landmark_conf_min * 0.75
+
+    def _preferred_lead_side(self, direction: int) -> Optional[str]:
+        if direction > 0:
+            return "right"
+        if direction < 0:
+            return "left"
+        return None
+
+    def _com_direction(self, f: Features, body_x: float) -> int:
+        velocity_threshold = max(0.035, self.cfg.hybrid_com_velocity_ratio * self.cfg.hip_vel_threshold)
+        if f.hip_vx >= velocity_threshold:
+            return 1
+        if f.hip_vx <= -velocity_threshold:
+            return -1
+
+        center = self.calib.lane_centers[self.current_lane]
+        shift_threshold = max(0.012, self.cfg.hybrid_com_shift_ratio * self.calib.step_distance)
+        shift = body_x - center
+        if shift >= shift_threshold:
+            return 1
+        if shift <= -shift_threshold:
+            return -1
+        return 0
+
+    def _ankle_motion_allowed(self, side: str, direction: int, com_direction: int) -> bool:
+        return (
+            direction != 0 and
+            direction == com_direction and
+            side == self._preferred_lead_side(com_direction)
+        )
+
+    def _movement_lead(self, f: Features, direction: int, now: float,
+                       allow_guarded: bool = False):
+        preferred = self._preferred_lead_side(direction)
+        if preferred is None:
+            return None, None
+
+        preferred_foot = getattr(f, preferred)
+        if self._foot_active(preferred_foot):
+            if allow_guarded or not (
+                self._trail_velocity_ignored(preferred, preferred_foot, now) or
+                self._spent_lead_velocity_ignored(preferred, preferred_foot, now)
+            ):
+                return preferred, preferred_foot
+        return None, None
+
+    def _fast_intent(self, f: Features, left_region: int, right_region: int,
+                     com_direction: int, now: float):
+        candidates = []
+        for side, foot, region in (
+            ("left", f.left, left_region),
+            ("right", f.right, right_region),
+        ):
+            if not self._foot_active(foot):
+                continue
+            if self._trail_velocity_ignored(side, foot, now):
+                continue
+            if self._spent_lead_velocity_ignored(side, foot, now):
+                continue
+            velocity_side = self._velocity_side(foot.vx)
+            if not self._ankle_motion_allowed(side, velocity_side, com_direction):
+                continue
+            if velocity_side != 0 and region == velocity_side:
+                candidates.append((abs(foot.vx), velocity_side, side, foot))
+
+        if self._lead_lock_active(now):
+            locked_foot = getattr(f, self._lead_lock_side)
+            if self._lead_lock_side != self._preferred_lead_side(com_direction):
+                self._clear_lead_lock()
+            elif com_direction != self._lead_lock_direction:
+                self._clear_lead_lock()
+            elif self._velocity_side(locked_foot.vx) == -self._lead_lock_direction:
+                self._clear_lead_lock()
+            else:
+                for _, direction, side, foot in candidates:
+                    if side == self._lead_lock_side and direction == self._lead_lock_direction:
+                        return direction, side, foot
+                return 0, self._lead_lock_side, getattr(f, self._lead_lock_side)
+
+        if not candidates:
+            self._clear_lead_lock()
+            return 0, None, None
+
+        _, direction, side, foot = max(candidates, key=lambda item: item[0])
+        self._set_lead_lock(side, direction, now)
+        return direction, side, foot
+
+    def _lead_lock_active(self, now: float) -> bool:
+        return (
+            self._lead_lock_side is not None and
+            self._lead_lock_direction != 0 and
+            now <= self._lead_lock_until
+        )
+
+    def _set_lead_lock(self, side: str, direction: int, now: float) -> None:
+        self._lead_lock_side = side
+        self._lead_lock_direction = direction
+        self._lead_lock_until = now + self.cfg.hybrid_lead_lock_sec
+
+    def _clear_lead_lock(self) -> None:
+        self._lead_lock_side = None
+        self._lead_lock_direction = 0
+        self._lead_lock_until = -1e9
+
+    def _set_display_lead(self, side: Optional[str], now: float) -> None:
+        if side not in ("left", "right"):
+            return
+        self._display_lead_side = side
+        self._display_lead_until = now + self.cfg.hybrid_lead_display_sec
+
+    def _display_lead(self, f: Features, now: float, com_direction: int = 0):
+        if self._display_lead_side is None or now > self._display_lead_until:
+            self._display_lead_side = None
+            self._display_lead_until = -1e9
+            return None, None
+        if (
+            com_direction != 0 and
+            self._display_lead_side != self._preferred_lead_side(com_direction)
+        ):
+            self._display_lead_side = None
+            self._display_lead_until = -1e9
+            return None, None
+        foot = getattr(f, self._display_lead_side)
+        if not self._foot_active(foot):
+            return None, None
+        return self._display_lead_side, foot
+
+    def _set_trail_ignore(self, lead_side: Optional[str], direction: int, now: float) -> None:
+        if lead_side not in ("left", "right") or direction == 0:
+            return
+        self._trail_ignore_side = "right" if lead_side == "left" else "left"
+        self._trail_ignore_direction = direction
+        self._trail_ignore_until = now + self.cfg.hybrid_trail_ignore_sec
+
+    def _clear_trail_ignore(self) -> None:
+        self._trail_ignore_side = None
+        self._trail_ignore_direction = 0
+        self._trail_ignore_until = -1e9
+
+    def _trail_ignore_active(self, now: float) -> bool:
+        if self._trail_ignore_side is None or self._trail_ignore_direction == 0:
+            return False
+        if now <= self._trail_ignore_until:
+            return True
+        self._clear_trail_ignore()
+        return False
+
+    def _trail_velocity_ignored(self, side: str, foot: FootFeature, now: float) -> bool:
+        return (
+            self._trail_ignore_active(now) and
+            side == self._trail_ignore_side and
+            self._foot_active(foot) and
+            self._velocity_side(foot.vx) == self._trail_ignore_direction
+        )
+
+    def _set_spent_lead(self, lead_side: Optional[str], direction: int, now: float) -> None:
+        if lead_side not in ("left", "right") or direction == 0:
+            return
+        self._spent_lead_side = lead_side
+        self._spent_lead_direction = direction
+        self._spent_lead_until = now + self.cfg.hybrid_spent_lead_sec
+
+    def _clear_spent_lead(self) -> None:
+        self._spent_lead_side = None
+        self._spent_lead_direction = 0
+        self._spent_lead_until = -1e9
+
+    def _spent_lead_active(self, now: float) -> bool:
+        if self._spent_lead_side is None or self._spent_lead_direction == 0:
+            return False
+        if now <= self._spent_lead_until:
+            return True
+        self._clear_spent_lead()
+        return False
+
+    def _spent_lead_velocity_ignored(self, side: str, foot: FootFeature, now: float) -> bool:
+        if not self._spent_lead_active(now) or side != self._spent_lead_side:
+            return False
+        if not self._foot_active(foot):
+            return False
+        velocity_side = self._velocity_side(foot.vx)
+        if velocity_side == -self._spent_lead_direction:
+            self._clear_spent_lead()
+            return False
+        neutral = self.calib.neutral_ankle.get(side, self.calib.neutral_hip)
+        near_neutral = abs(foot.x - neutral) <= max(0.04, 0.24 * self.calib.step_distance)
+        settled = abs(foot.vx) <= max(0.055, 0.28 * self.calib.vel_threshold)
+        if near_neutral and settled:
+            self._clear_spent_lead()
+            return False
+        return velocity_side == self._spent_lead_direction
+
+    def _set_center_settle(self, old_lane: int, new_lane: int, now: float) -> None:
+        if old_lane == 0 or new_lane != 0:
+            return
+        self._center_settle_direction = -old_lane
+        self._center_settle_until = now + self.cfg.hybrid_center_settle_sec
+
+    def _clear_center_settle(self) -> None:
+        self._center_settle_direction = 0
+        self._center_settle_until = -1e9
+
+    def _center_settle_active(self, now: float) -> bool:
+        if self._center_settle_direction == 0:
+            return False
+        if now <= self._center_settle_until:
+            return True
+        self._clear_center_settle()
+        return False
+
+    def _center_settle_blocks(self, lane: int, now: float) -> bool:
+        return (
+            self.current_lane == 0 and
+            lane == self._center_settle_direction and
+            self._center_settle_active(now)
+        )
+
+    def _body_supports_intent(self, f: Features, body_x: float, direction: int) -> bool:
+        if direction == 0:
+            return False
+        current_center = self.calib.lane_centers[self.current_lane]
+        body_shift = (body_x - current_center) * direction
+        min_shift = max(0.015, self.cfg.hybrid_body_shift_ratio * self.calib.step_distance)
+        min_velocity = max(0.04, self.cfg.hybrid_body_velocity_ratio * self.cfg.hip_vel_threshold)
+        return (
+            body_shift >= min_shift or
+            f.hip_vx * direction >= min_velocity or
+            self._region(body_x) == direction
+        )
+
+    def _body_supports_center_return(self, f: Features, body_x: float) -> bool:
+        if self.current_lane == 0:
+            return False
+        direction = -self.current_lane
+        current_center = self.calib.lane_centers[self.current_lane]
+        body_shift = (body_x - current_center) * direction
+        min_shift = max(0.055, self.cfg.hybrid_center_return_shift_ratio * self.calib.step_distance)
+        min_velocity = max(0.05, self.cfg.hybrid_center_return_velocity_ratio * self.cfg.hip_vel_threshold)
+        return (
+            body_shift >= min_shift or
+            f.hip_vx * direction >= min_velocity or
+            self._region(body_x) == 0
+        )
+
+    def _feet_support_center_return(self, f: Features, left_region: int,
+                                    right_region: int, direction: int,
+                                    com_direction: int) -> bool:
+        if self.current_lane == 0 or direction == 0:
+            return True
+
+        preferred = self._preferred_lead_side(direction)
+        if preferred is None:
+            return False
+
+        foot = getattr(f, preferred)
+        if not self._foot_active(foot):
+            return True
+
+        preferred_region = left_region if preferred == "left" else right_region
+        if preferred_region == 0:
+            return True
+
+        if com_direction != direction:
+            return False
+
+        min_velocity = max(0.055, 0.28 * self.calib.vel_threshold)
+        return foot.vx * direction >= min_velocity
+
+    def _body_confirms_lane(self, body_x: float, lane: int) -> bool:
+        return (
+            self._region(body_x) == lane or
+            abs(body_x - self.calib.lane_centers[lane]) <= self.cfg.confirm_radius
+        )
+
+    def _start_confirmation_hold(self, lane: int, body_x: float, now: float) -> None:
+        if self._body_confirms_lane(body_x, lane):
+            self._confirm_lane = None
+            self._confirm_until = -1e9
+            return
+        self._confirm_lane = lane
+        self._confirm_until = now + self.cfg.hybrid_confirmation_hold_sec
+
+    def _confirmation_hold_active(self, body_x: float, now: float) -> bool:
+        if self._confirm_lane is None:
+            return False
+        if self._body_confirms_lane(body_x, self._confirm_lane):
+            self._confirm_lane = None
+            self._confirm_until = -1e9
+            return False
+        if now <= self._confirm_until:
+            return True
+        self._confirm_lane = None
+        self._confirm_until = -1e9
+        return False
+
+    def update(self, f: Features, now: float) -> Decision:
+        cfg = self.cfg
+        suppressed = self._suppressed(f, now)
+
+        body_x = self._body_x(f)
+        body_region = self._region(body_x)
+        com_direction = self._com_direction(f, body_x)
+        left_pred = self._foot_prediction(f.left)
+        right_pred = self._foot_prediction(f.right)
+        left_region = self._region(left_pred) if self._foot_active(f.left) else 0
+        right_region = self._region(right_pred) if self._foot_active(f.right) else 0
+        left_com_ignored = com_direction > 0 and self._foot_active(f.left)
+        right_com_ignored = com_direction < 0 and self._foot_active(f.right)
+        left_used = self._foot_active(f.left) and not left_com_ignored
+        right_used = self._foot_active(f.right) and not right_com_ignored
+        left_scored_region = left_region if left_used else None
+        right_scored_region = right_region if right_used else None
+        confirmation_hold = self._confirmation_hold_active(body_x, now)
+        if confirmation_hold:
+            ignored_trail_side = None
+            if self._trail_velocity_ignored("left", f.left, now):
+                ignored_trail_side = "left"
+            elif self._trail_velocity_ignored("right", f.right, now):
+                ignored_trail_side = "right"
+            ignored_spent_side = None
+            if self._spent_lead_velocity_ignored("left", f.left, now):
+                ignored_spent_side = "left"
+            elif self._spent_lead_velocity_ignored("right", f.right, now):
+                ignored_spent_side = "right"
+            trail_note = f"/trail-ignore={ignored_trail_side}" if ignored_trail_side else ""
+            spent_note = f"/spent-lead={ignored_spent_side}" if ignored_spent_side else ""
+            com_note = f"/com={com_direction:+d}" if com_direction != 0 else "/com=0"
+            display_lead_side, display_lead_foot = self._display_lead(f, now, com_direction)
+            self.state = _LANE_TO_STABLE[self.current_lane]
+            self.intent_confidence = max(self.intent_confidence, 0.5)
+            return Decision(
+                command=None,
+                state=self.state,
+                current_lane=self.current_lane,
+                leading_foot=display_lead_side,
+                intent_confidence=self.intent_confidence,
+                suppressed=suppressed,
+                reason=f"hold-confirm L{left_region:+d}/R{right_region:+d}/B{body_region:+d}/body=--"
+                       f"{com_note}{trail_note}{spent_note}",
+                lead_vx=abs(display_lead_foot.vx) if display_lead_foot is not None else 0.0,
+                lead_disp=0.0,
+                vel_thr=max(0.06, 0.35 * self.calib.vel_threshold),
+                disp_thr=self.calib.disp_threshold,
+                controller="hybrid",
+                body_x=body_x,
+            )
+        fast_intent, lead_side, lead_foot = self._fast_intent(
+            f,
+            left_region if left_used else 0,
+            right_region if right_used else 0,
+            com_direction,
+            now,
+        )
+        body_support = self._body_supports_intent(f, body_x, fast_intent)
+        ignored_trail_side = None
+        if self._trail_velocity_ignored("left", f.left, now):
+            ignored_trail_side = "left"
+        elif self._trail_velocity_ignored("right", f.right, now):
+            ignored_trail_side = "right"
+        ignored_spent_side = None
+        if self._spent_lead_velocity_ignored("left", f.left, now):
+            ignored_spent_side = "left"
+        elif self._spent_lead_velocity_ignored("right", f.right, now):
+            ignored_spent_side = "right"
+        both_feet_region = (
+            left_scored_region
+            if (
+                left_scored_region is not None and
+                right_scored_region is not None and
+                left_scored_region == right_scored_region
+            )
+            else 0
+        )
+        left_raw_velocity_side = self._velocity_side(f.left.vx)
+        right_raw_velocity_side = self._velocity_side(f.right.vx)
+        left_com_gated = (
+            left_raw_velocity_side != 0 and
+            not self._ankle_motion_allowed("left", left_raw_velocity_side, com_direction)
+        )
+        right_com_gated = (
+            right_raw_velocity_side != 0 and
+            not self._ankle_motion_allowed("right", right_raw_velocity_side, com_direction)
+        )
+        left_velocity_side = (
+            0 if (
+                left_com_ignored or
+                ignored_trail_side == "left" or
+                ignored_spent_side == "left"
+            )
+            else (0 if left_com_gated else left_raw_velocity_side)
+        )
+        right_velocity_side = (
+            0 if (
+                right_com_ignored or
+                ignored_trail_side == "right" or
+                ignored_spent_side == "right"
+            )
+            else (0 if right_com_gated else right_raw_velocity_side)
+        )
+        center_direction = -self.current_lane if self.current_lane != 0 else 0
+        left_actual_region = self._region(f.left.x) if left_used else 0
+        right_actual_region = self._region(f.right.x) if right_used else 0
+        center_foot_support = self._feet_support_center_return(
+            f, left_actual_region, right_actual_region, center_direction, com_direction)
+        center_foot_gate = self.current_lane != 0 and body_region == 0 and not center_foot_support
+        com_leg_gated = (
+            ("L" if left_com_gated or left_com_ignored else "") +
+            ("R" if right_com_gated or right_com_ignored else "")
+        )
+
+        scores = {-1: 0.0, 0: 0.0, 1: 0.0}
+        scores[body_region] += cfg.hybrid_body_score
+
+        if left_scored_region is not None and right_scored_region is not None and both_feet_region != 0:
+            scores[both_feet_region] += cfg.hybrid_both_feet_score
+        elif left_scored_region == 0 and right_scored_region == 0:
+            scores[0] += cfg.hybrid_both_feet_score
+        else:
+            if left_scored_region is not None:
+                if left_scored_region != 0:
+                    scores[left_scored_region] += cfg.hybrid_one_foot_score
+                else:
+                    scores[0] += cfg.hybrid_one_foot_score * 0.55
+            if right_scored_region is not None:
+                if right_scored_region != 0:
+                    scores[right_scored_region] += cfg.hybrid_one_foot_score
+                else:
+                    scores[0] += cfg.hybrid_one_foot_score * 0.55
+
+        if fast_intent != 0 and body_support:
+            scores[fast_intent] += cfg.hybrid_fast_foot_score
+        if left_velocity_side != 0 and left_scored_region == left_velocity_side:
+            scores[left_velocity_side] += cfg.hybrid_velocity_score
+        if right_velocity_side != 0 and right_scored_region == right_velocity_side:
+            scores[right_velocity_side] += cfg.hybrid_velocity_score
+        if self.current_lane != 0:
+            scores[self.current_lane] += cfg.hybrid_hold_score
+
+        if (
+            self.current_lane != 0 and
+            body_region == 0 and
+            center_foot_support and
+            (fast_intent == -self.current_lane or both_feet_region == 0)
+        ):
+            scores[0] += cfg.hybrid_fast_foot_score
+
+        side_candidate = -1 if scores[-1] > scores[1] else 1
+        side_score = scores[side_candidate]
+        side_body_support = self._body_supports_intent(f, body_x, side_candidate)
+        center_return_support = (
+            self._body_supports_center_return(f, body_x) and center_foot_support
+        )
+        next_lane = self.current_lane
+        reason = "hold"
+        resolved_lead_side = None
+        resolved_lead_foot = None
+
+        if suppressed:
+            reason = "suppressed"
+        elif center_return_support:
+            next_lane = 0
+            reason = "return-center"
+        elif fast_intent != 0 and not body_support:
+            reason = f"body-gate {fast_intent:+d}"
+            if not self._lead_lock_active(now):
+                self._clear_lead_lock()
+        elif fast_intent != 0 and side_score >= cfg.hybrid_enter_score:
+            next_lane = fast_intent
+            reason = f"fast-foot {fast_intent:+d}"
+        elif side_score >= cfg.hybrid_enter_score and side_score > scores[0] + 0.12 and side_body_support:
+            next_lane = side_candidate
+            reason = "confirmed" if body_region == side_candidate else "feet"
+        elif side_score >= cfg.hybrid_enter_score and side_score > scores[0] + 0.12:
+            reason = f"body-gate {side_candidate:+d}"
+        elif scores[0] >= cfg.hybrid_center_score and scores[0] >= side_score:
+            if self.current_lane == 0 or center_foot_support:
+                next_lane = 0
+                reason = "center-com" if body_region == 0 else "center-feet"
+            else:
+                reason = "center-foot-gate"
+
+        if (
+            ignored_trail_side is not None and
+            next_lane != self.current_lane and
+            (next_lane - self.current_lane) * self._trail_ignore_direction > 0 and
+            body_region != next_lane and
+            not (fast_intent != 0 and lead_side != ignored_trail_side)
+        ):
+            next_lane = self.current_lane
+            reason = f"trail-ignore {ignored_trail_side}"
+
+        if (
+            ignored_spent_side is not None and
+            next_lane != self.current_lane and
+            (next_lane - self.current_lane) * self._spent_lead_direction > 0 and
+            body_region != next_lane
+        ):
+            next_lane = self.current_lane
+            reason = f"spent-lead {ignored_spent_side}"
+
+        center_settle_blocked = False
+        if next_lane != self.current_lane and self._center_settle_blocks(next_lane, now):
+            center_settle_blocked = True
+            next_lane = self.current_lane
+            reason = f"center-settle {self._center_settle_direction:+d}"
+
+        if next_lane != self.current_lane:
+            change_dir = 1 if next_lane > self.current_lane else -1
+            resolved_lead_side, resolved_lead_foot = self._movement_lead(
+                f, change_dir, now, allow_guarded=True)
+            if resolved_lead_side is None and fast_intent == change_dir and body_support:
+                resolved_lead_side, resolved_lead_foot = lead_side, lead_foot
+
+        command: Optional[str] = None
+        if not suppressed and next_lane != self.current_lane:
+            if now - self.last_lane_change_t >= cfg.rearm_time:
+                old_lane = self.current_lane
+                change_dir = 1 if next_lane > old_lane else -1
+                self.current_lane = next_lane
+                self.last_lane_change_t = now
+                self._start_confirmation_hold(next_lane, body_x, now)
+                self._set_center_settle(old_lane, next_lane, now)
+                self._set_trail_ignore(resolved_lead_side, change_dir, now)
+                self._set_spent_lead(resolved_lead_side, change_dir, now)
+                self._set_display_lead(resolved_lead_side, now)
+                reason += f" -> lane {next_lane:+d}"
+                self._clear_lead_lock()
+            else:
+                reason = "rearm"
+        elif body_region == self.current_lane and fast_intent == 0:
+            self._clear_lead_lock()
+
+        self.state = _LANE_TO_STABLE[self.current_lane]
+        best_score = max(scores.values())
+        self.intent_confidence = _clamp01(best_score / 3.0)
+
+        display_lead_side = resolved_lead_side
+        display_lead_foot = resolved_lead_foot
+        if display_lead_side is None and fast_intent != 0 and body_support:
+            display_lead_side = lead_side
+            display_lead_foot = lead_foot
+        if display_lead_side is None:
+            display_lead_side, display_lead_foot = self._display_lead(f, now, com_direction)
+        lead_vx = abs(display_lead_foot.vx) if display_lead_foot is not None else 0.0
+        lead_disp = 0.0
+        if display_lead_foot is not None and display_lead_side is not None:
+            lead_disp = abs(self._foot_prediction(display_lead_foot) - self.calib.neutral_ankle[display_lead_side])
+
+        return Decision(
+            command=command,
+            state=self.state,
+            current_lane=self.current_lane,
+            leading_foot=display_lead_side,
+            intent_confidence=self.intent_confidence,
+            suppressed=suppressed,
+            reason=f"{reason} L{left_region:+d}/R{right_region:+d}/B{body_region:+d}"
+                   f"/body={'OK' if (body_support or side_body_support or center_return_support) else '--'}"
+                   f"/com={com_direction:+d}"
+                   f"{f'/com-leg-gate={com_leg_gated}' if com_leg_gated else ''}"
+                   f"{'/center-foot-gate' if center_foot_gate else ''}"
+                   f"{f'/center-settle={self._center_settle_direction:+d}' if center_settle_blocked else ''}"
+                   f"{f'/trail-ignore={ignored_trail_side}' if ignored_trail_side else ''}"
+                   f"{f'/spent-lead={ignored_spent_side}' if ignored_spent_side else ''}",
+            lead_vx=lead_vx,
+            lead_disp=lead_disp,
+            vel_thr=max(0.06, 0.35 * self.calib.vel_threshold),
+            disp_thr=self.calib.disp_threshold,
+            controller="hybrid",
+            body_x=body_x,
+        )
+
+
 class PositionLaneController:
-    """Robust, position-based lane controller (the default).
+    """Robust, position-based lane controller.
 
     Where the two-stage ``LaneStateMachine`` infers an *early* lane-change intent
     from foot velocity (low latency, but direction-ambiguous and fragile: the lead
     foot flips mid-step and the per-foot displacement gate is asymmetric), this
     controller maps the player's **lateral body position** straight onto the
-    nearest calibrated lane. It emits one "left"/"right" command per calibrated
-    boundary crossed, with a hysteresis margin so standing on a line doesn't
+    nearest calibrated lane. It updates one lane per calibrated boundary crossed,
+    with a hysteresis margin so standing on a line doesn't
     chatter. Symmetric by construction and easy to reason about: where your hips
     are *is* where the avatar is.
 
-    Trade-off vs. feet mode: the command fires when your torso actually crosses
+    Trade-off vs. feet mode: the lane changes when your torso actually crosses
     the lane boundary rather than ~80 ms earlier on the first foot twitch. For a
     step-to-move game that is plenty responsive and far more reliable.
     """
