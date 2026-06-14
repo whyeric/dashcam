@@ -567,7 +567,8 @@ class App:
 
     def _start_play(self) -> None:
         if self.args.mode == "hybrid":
-            self.sm = HybridLaneController(self.cfg, self.calib)
+            self.sm = HybridLaneController(self.cfg, self.calib,
+                                           log_path=getattr(self.args, "log_csv", None))
         elif self.args.mode == "feet":
             self.sm = LaneStateMachine(self.cfg, self.calib)
         else:
@@ -695,6 +696,8 @@ def parse_args():
     p.add_argument("--save-calib", help="save calibration json after calibrating")
     p.add_argument("--skip-calibration", action="store_true",
                    help="use neutral default geometry (no calibration pass)")
+    p.add_argument("--log-csv", metavar="FILE",
+                   help="write per-frame lane-decision values to a CSV file (hybrid mode only)")
     args = p.parse_args()
 
     # Game mode is the default and needs a session code.

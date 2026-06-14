@@ -45,6 +45,7 @@ shoulders are unreliable.
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 from collections import deque
@@ -892,7 +893,32 @@ class HybridLaneController:
     which could get stuck left or flip between legs during rightward movement.
     """
 
-    def __init__(self, cfg: Config, calib: Calibration):
+    _CSV_FIELDS = [
+        "t",
+        # body / CoM
+        "body_x", "body_region", "com_direction", "hip_vx", "hip_x", "hip_conf",
+        # left foot
+        "lf_x", "lf_vx", "lf_vy", "lf_pred", "lf_region", "lf_src", "lf_reliable",
+        # right foot
+        "rf_x", "rf_vx", "rf_vy", "rf_pred", "rf_region", "rf_src", "rf_reliable",
+        # knee velocities
+        "knee_vx_left", "knee_vx_right",
+        # fast-path intent
+        "fast_intent", "lead_side", "body_support",
+        # scores per lane
+        "score_L", "score_C", "score_R",
+        # score-driven decision
+        "side_candidate", "side_score", "side_body_support",
+        "both_feet_region", "center_return_support", "center_foot_gate",
+        "confirmation_hold",
+        # guards / flags
+        "suppressed", "ignored_trail_side", "ignored_spent_side",
+        "center_settle_blocked",
+        # outcome
+        "prev_lane", "next_lane", "reason",
+    ]
+
+    def __init__(self, cfg: Config, calib: Calibration, log_path: Optional[str] = None):
         self.cfg = cfg
         self.calib = calib
 
@@ -916,6 +942,13 @@ class HybridLaneController:
         self._center_settle_until = -1e9
         self._confirm_lane: Optional[int] = None
         self._confirm_until = -1e9
+
+        self._csv_fh = None
+        self._csv_writer = None
+        if log_path:
+            self._csv_fh = open(log_path, "w", newline="", encoding="utf-8")
+            self._csv_writer = csv.DictWriter(self._csv_fh, fieldnames=self._CSV_FIELDS)
+            self._csv_writer.writeheader()
 
     def _body_x(self, f: Features) -> float:
         return f.hip_x if f.hip_conf >= self.cfg.landmark_conf_min else f.body_x
@@ -1184,6 +1217,11 @@ class HybridLaneController:
         if self.current_lane == 0:
             return False
         direction = -self.current_lane
+        # If body is actively moving away from center, don't claim it supports returning.
+        # This prevents a fast-foot early trigger (before body crosses the boundary) from
+        # being immediately undone by center_return seeing "body/feet still in center".
+        if f.hip_vx * direction < -max(0.03, 0.15 * self.cfg.hip_vel_threshold):
+            return False
         current_center = self.calib.lane_centers[self.current_lane]
         body_shift = (body_x - current_center) * direction
         min_shift = max(0.055, self.cfg.hybrid_center_return_shift_ratio * self.calib.step_distance)
@@ -1210,6 +1248,10 @@ class HybridLaneController:
 
         preferred_region = left_region if preferred == "left" else right_region
         if preferred_region == 0:
+            # Foot is already at center, but only trust that if the body isn't
+            # actively moving away from center (which would mean mid-outward-step).
+            if com_direction != 0 and com_direction != direction:
+                return False
             return True
 
         if com_direction != direction:
@@ -1248,6 +1290,7 @@ class HybridLaneController:
     def update(self, f: Features, now: float) -> Decision:
         cfg = self.cfg
         suppressed = self._suppressed(f, now)
+        prev_lane = self.current_lane
 
         body_x = self._body_x(f)
         body_region = self._region(body_x)
@@ -1497,6 +1540,54 @@ class HybridLaneController:
         lead_disp = 0.0
         if display_lead_foot is not None and display_lead_side is not None:
             lead_disp = abs(self._foot_prediction(display_lead_foot) - self.calib.neutral_ankle[display_lead_side])
+
+        if self._csv_writer is not None:
+            self._csv_writer.writerow({
+                "t": f"{now:.4f}",
+                "body_x": f"{body_x:.4f}",
+                "body_region": body_region,
+                "com_direction": com_direction,
+                "hip_vx": f"{f.hip_vx:.4f}",
+                "hip_x": f"{f.hip_x:.4f}",
+                "hip_conf": f"{f.hip_conf:.3f}",
+                "lf_x": f"{f.left.x:.4f}",
+                "lf_vx": f"{f.left.vx:.4f}",
+                "lf_vy": f"{f.left.vy:.4f}",
+                "lf_pred": f"{left_pred:.4f}",
+                "lf_region": left_region,
+                "lf_src": f.left.source,
+                "lf_reliable": int(f.left.reliable),
+                "rf_x": f"{f.right.x:.4f}",
+                "rf_vx": f"{f.right.vx:.4f}",
+                "rf_vy": f"{f.right.vy:.4f}",
+                "rf_pred": f"{right_pred:.4f}",
+                "rf_region": right_region,
+                "rf_src": f.right.source,
+                "rf_reliable": int(f.right.reliable),
+                "knee_vx_left": f"{f.knee_vx.get('left', 0.0):.4f}",
+                "knee_vx_right": f"{f.knee_vx.get('right', 0.0):.4f}",
+                "fast_intent": fast_intent,
+                "lead_side": lead_side or "",
+                "body_support": int(body_support),
+                "score_L": f"{scores[-1]:.3f}",
+                "score_C": f"{scores[0]:.3f}",
+                "score_R": f"{scores[1]:.3f}",
+                "side_candidate": side_candidate,
+                "side_score": f"{side_score:.3f}",
+                "side_body_support": int(side_body_support),
+                "both_feet_region": both_feet_region,
+                "center_return_support": int(center_return_support),
+                "center_foot_gate": int(center_foot_gate),
+                "confirmation_hold": int(confirmation_hold),
+                "suppressed": int(suppressed),
+                "ignored_trail_side": ignored_trail_side or "",
+                "ignored_spent_side": ignored_spent_side or "",
+                "center_settle_blocked": int(center_settle_blocked),
+                "prev_lane": prev_lane,
+                "next_lane": self.current_lane,
+                "reason": reason,
+            })
+            self._csv_fh.flush()
 
         return Decision(
             command=command,
