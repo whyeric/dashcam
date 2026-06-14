@@ -6,6 +6,8 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #1a1a2e; display: flex; flex-direction: column; height: 100vh; }
+
+    
     
     .header {
       display: flex;
@@ -64,6 +66,26 @@
     <div class="player-label p2" id="p2-label">🟥 Player 2</div>
   </div>
 
+  <!-- Countdown overlay -->
+  <div id="countdown" style="
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    z-index: 999;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 20px;
+    font-family: Arial, sans-serif;
+    color: white;
+    text-align: center;
+  ">
+    <div id="countdown-title" style="font-size: 1.2rem; color: #9aa0b4;">Both players connected!</div>
+    <div id="countdown-number" style="font-size: 10rem; font-weight: 900; line-height: 1;"></div>
+    <div id="countdown-sub" style="font-size: 1.1rem; color: #9aa0b4;"></div>
+  </div>
+
   <div class="games">
     <div class="game-wrapper p1">
       <iframe id="game-p1" src="game.html"></iframe>
@@ -76,62 +98,136 @@
   </div>
 
   <script>
-    // Relay runs on :8765 of whatever host served this page (so it also works
-    // if the screen is opened from another machine on the LAN).
     var WS_URL = location.hostname === "localhost"
     ? "ws://localhost:8000"
-    : "wss://dashcam-production.up.railway.app" 
-    var connectedPlayers = { p1: false, p2: false }
-    var ws
+    : "wss://dashcam-production.up.railway.app"
 
-    function setWaiting(player, waiting) {
-      connectedPlayers[player] = !waiting
-      var el = document.getElementById("wait-" + player)
-      if (el) el.style.display = waiting ? "flex" : "none"
+  var connectedPlayers = { p1: false, p2: false }
+  var readyPlayers = { p1: false, p2: false }
+  var gameStarted = false
+  var ws
+
+  function setWaiting(player, waiting) {
+    connectedPlayers[player] = !waiting
+    var el = document.getElementById("wait-" + player)
+    if (el) el.style.display = waiting ? "flex" : "none"
+  }
+
+  function showReadyScreen() {
+    var overlay = document.getElementById("countdown")
+    var title = document.getElementById("countdown-title")
+    var num = document.getElementById("countdown-number")
+    var sub = document.getElementById("countdown-sub")
+    overlay.style.display = "flex"
+    title.textContent = "Both players connected!"
+    num.textContent = "🎮"
+    sub.textContent = "Press any button to ready up"
+  }
+
+  function updateReadyScreen() {
+    var num = document.getElementById("countdown-number")
+    var sub = document.getElementById("countdown-sub")
+    if (readyPlayers.p1 && readyPlayers.p2) {
+      startCountdown()
+    } else if (readyPlayers.p1) {
+      num.textContent = "🟦"
+      sub.textContent = "Player 1 is ready — waiting for Player 2..."
+    } else if (readyPlayers.p2) {
+      num.textContent = "🟥"
+      sub.textContent = "Player 2 is ready — waiting for Player 1..."
+    }
+  }
+
+  function autoStartGame(iframe) {
+    if (!iframe || !iframe.contentWindow) return
+    // send a click and space press to dismiss any start screen
+    iframe.contentWindow.postMessage({ action: "press", key: "space" }, "*")
+    setTimeout(function() {
+      iframe.contentWindow.postMessage({ action: "release", key: "space" }, "*")
+    }, 100)
+  }
+
+  function startCountdown() {
+    var title = document.getElementById("countdown-title")
+    var num = document.getElementById("countdown-number")
+    var sub = document.getElementById("countdown-sub")
+    title.textContent = "Get ready!"
+    sub.textContent = ""
+    num.style.color = "white"
+    var count = 3
+    num.textContent = count
+    var interval = setInterval(function() {
+      count--
+      if (count === 0) {
+        num.textContent = "GO!"
+        num.style.color = "#4caf50"
+      } else if (count < 0) {
+        clearInterval(interval)
+        document.getElementById("countdown").style.display = "none"
+        gameStarted = true
+        // auto-click through both game iframes
+        autoStartGame(document.getElementById("game-p1"))
+        autoStartGame(document.getElementById("game-p2"))
+      } else {
+        num.textContent = count
+      }
+    }, 1000)
+  }
+
+  function connect() {
+    ws = new WebSocket(WS_URL)
+
+    ws.onopen = function () {
+      console.log("[1v1] connected to relay — registering as screen")
+      ws.send(JSON.stringify({ type: "register", role: "screen" }))
     }
 
-    function connect() {
-      ws = new WebSocket(WS_URL)
+    ws.onmessage = function (event) {
+      var data
+      try { data = JSON.parse(event.data) } catch (e) { return }
 
-      ws.onopen = function () {
-        console.log("[1v1] connected to relay — registering as screen")
-        ws.send(JSON.stringify({ type: "register", role: "screen" }))
-      }
+      if (data.type === "state") {
+        setWaiting("p1", data.players.indexOf("p1") === -1)
+        setWaiting("p2", data.players.indexOf("p2") === -1)
+        if (connectedPlayers.p1 && connectedPlayers.p2) showReadyScreen()
 
-      ws.onmessage = function (event) {
-        var data
-        try { data = JSON.parse(event.data) } catch (e) { return }
+      } else if (data.type === "player_connected") {
+        setWaiting(data.player, false)
+        console.log("[1v1]", data.player, "connected")
+        if (connectedPlayers.p1 && connectedPlayers.p2) showReadyScreen()
 
-        if (data.type === "state") {
-          // Authoritative roster sent on (re)connect — set both overlays at once.
-          setWaiting("p1", data.players.indexOf("p1") === -1)
-          setWaiting("p2", data.players.indexOf("p2") === -1)
-          console.log("[1v1] state — players:", data.players)
-        } else if (data.type === "player_connected") {
-          setWaiting(data.player, false)            // hide the waiting overlay
-          console.log("[1v1]", data.player, "connected")
-        } else if (data.type === "player_disconnected") {
-          setWaiting(data.player, true)             // bring the overlay back
-          console.log("[1v1]", data.player, "disconnected")
-        } else if (data.type === "input") {
-          // Route each player's input to their own game panel.
-          var iframe = data.player === "p1"
-            ? document.getElementById("game-p1")
-            : document.getElementById("game-p2")
-          if (iframe && iframe.contentWindow) {
-            iframe.contentWindow.postMessage({ action: data.action, key: data.key }, "*")
+      } else if (data.type === "player_disconnected") {
+        setWaiting(data.player, true)
+        readyPlayers = { p1: false, p2: false }
+        gameStarted = false
+        document.getElementById("countdown").style.display = "none"
+        console.log("[1v1]", data.player, "disconnected")
+
+      } else if (data.type === "input") {
+        if (!gameStarted) {
+          if (!readyPlayers[data.player]) {
+            readyPlayers[data.player] = true
+            updateReadyScreen()
           }
+          return
+        }
+        var iframe = data.player === "p1"
+          ? document.getElementById("game-p1")
+          : document.getElementById("game-p2")
+        if (iframe && iframe.contentWindow) {
+          iframe.contentWindow.postMessage({ action: data.action, key: data.key }, "*")
         }
       }
-
-      ws.onclose = function () {
-        console.warn("[1v1] relay closed — reconnecting in 1.5s")
-        setTimeout(connect, 1500)
-      }
-      ws.onerror = function () { try { ws.close() } catch (e) {} }
     }
 
-    connect()
+    ws.onclose = function () {
+      console.warn("[1v1] relay closed — reconnecting in 1.5s")
+      setTimeout(connect, 1500)
+    }
+    ws.onerror = function () { try { ws.close() } catch (e) {} }
+  }
+
+  connect()
   </script>
 
 </body>

@@ -97,8 +97,8 @@
     // ---- config -----------------------------------------------------------
     // The page is served from the computer on :8000; the relay is on :8765.
     var WS_URL = location.hostname === "localhost"
-    ? "ws://localhost:8000"
-    : "wss://dashcam-production.up.railway.app"
+      ? "ws://localhost:8000"
+      : "wss://dashcam-production.up.railway.app"
     var RECONNECT_MS = 1500;
 
     // LEFT/RIGHT = lane change, JUMP = up arrow, ROLL = down arrow.

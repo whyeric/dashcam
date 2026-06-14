@@ -41,6 +41,7 @@ wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let msg
     try { msg = JSON.parse(raw.toString()) } catch { return }
+    console.log('[server] received:', msg)  // ADD THIS
 
     if (msg.type === 'register') {
       if (msg.role === 'screen') {
