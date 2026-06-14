@@ -3,12 +3,12 @@
   "scripts": {
     "start": "node server/index.js",
     "solo": "concurrently \"node server/index.js\" \"open-cli http://localhost:8000\"",
-    "1v1": "concurrently \"node server/index.js\" \"open-cli http://localhost:8000/1v1.html\""
+    "1v1": "concurrently \"node server/index.js\" \"open-cli https://dashcam-production.up.railway.app/1v1.html\""
   },
   "dependencies": {
-    "concurrently": "^9.0.0",
     "express": "^4.22.2",
+    "ws": "^8.21.0",
     "open-cli": "^9.0.0",
-    "ws": "^8.21.0"
+    "concurrently": "^9.0.0"
   }
 }
