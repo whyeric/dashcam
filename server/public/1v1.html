@@ -29,6 +29,8 @@
       }
       .run-indicator .run-status { color: #9ca3af; }
       .run-indicator.running .run-status { color: #22c55e; }
+      .run-indicator.warning .run-status { color: #f59e0b; }
+      .run-indicator.penalty .run-status { color: #ef4444; }
       .run-track {
         height: 8px; overflow: hidden; border-radius: 999px;
         background: rgba(17, 24, 39, 0.85); border: 1px solid rgba(255, 255, 255, 0.35);
@@ -38,6 +40,8 @@
         transition: width 80ms linear, background-color 120ms linear;
       }
       .run-indicator.running .run-fill { background: #22c55e; }
+      .run-indicator.warning .run-fill { background: #f59e0b; }
+      .run-indicator.penalty .run-fill { background: #ef4444; }
     </style>
   </head>
   <body>
@@ -65,9 +69,15 @@
         var WS_URL = params.get("ws") || "ws://localhost:8765";
         var RECONNECT_MS = 1000;
         var STALE_MS = 500;
+        var WARNING_MS = 2000;
+        var KILL_MS = 5000;
+        var SLAM_COUNT = 5;
+        var SLAM_GAP_MS = 100;
+        var SLAM_HOLD_MS = 200;
+        var activeWs = null;
         var state = {
-          p1: { intensity: 0, running: false, seen: 0 },
-          p2: { intensity: 0, running: false, seen: 0 },
+          p1: { intensity: 0, running: false, seen: 0, idleSince: 0, killed: false, warning: false, penaltyPaused: false },
+          p2: { intensity: 0, running: false, seen: 0, idleSince: 0, killed: false, warning: false, penaltyPaused: false },
         };
 
         function clamp01(value) {
@@ -81,9 +91,56 @@
           var s = state[player];
           var intensity = clamp01(s.intensity);
           el.classList.toggle("running", !!s.running);
-          el.querySelector(".run-status").textContent =
-            (s.running ? "RUNNING " : "idle ") + intensity.toFixed(2);
+          el.classList.toggle("warning", !!s.warning && !s.killed);
+          el.classList.toggle("penalty", !!s.killed);
+          var label = s.killed ? "PENALTY " : s.warning ? "WARNING " : s.running ? "RUNNING " : "idle ";
+          el.querySelector(".run-status").textContent = label + intensity.toFixed(2);
           el.querySelector(".run-fill").style.width = Math.round(intensity * 100) + "%";
+        }
+
+        function sendControl(player, action, key) {
+          if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return false;
+          activeWs.send(JSON.stringify({ player: player, action: action, key: key }));
+          return true;
+        }
+
+        function slamLeft(player) {
+          if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return false;
+          for (var i = 0; i < SLAM_COUNT; i++) {
+            (function (delay) {
+              setTimeout(function () { sendControl(player, "press", "left"); }, delay);
+              setTimeout(function () { sendControl(player, "release", "left"); }, delay + SLAM_HOLD_MS);
+            })(i * SLAM_GAP_MS);
+          }
+          return true;
+        }
+
+        function clearPenalty(player, pausePenalty) {
+          if (player !== "p1" && player !== "p2") {
+            clearPenalty("p1", pausePenalty);
+            clearPenalty("p2", pausePenalty);
+            return;
+          }
+          var s = state[player];
+          s.warning = false;
+          s.killed = false;
+          s.idleSince = 0;
+          s.penaltyPaused = !!pausePenalty;
+          updateIndicator(player);
+        }
+
+        function resumePenalty(player) {
+          if (player !== "p1" && player !== "p2") {
+            resumePenalty("p1");
+            resumePenalty("p2");
+            return;
+          }
+          var s = state[player];
+          s.penaltyPaused = false;
+          s.warning = false;
+          s.killed = false;
+          s.idleSince = s.running ? 0 : Date.now();
+          updateIndicator(player);
         }
 
         function setRunning(player, intensity, running) {
@@ -92,10 +149,17 @@
             setRunning("p2", intensity, running);
             return;
           }
+          var now = Date.now();
+          var wasIdleSince = state[player].idleSince;
+          var isRunning = running !== undefined ? !!running : clamp01(intensity) > 0.05;
           state[player] = {
             intensity: clamp01(intensity),
-            running: running !== undefined ? !!running : clamp01(intensity) > 0.05,
-            seen: Date.now(),
+            running: isRunning,
+            seen: now,
+            idleSince: isRunning || state[player].penaltyPaused ? 0 : wasIdleSince || now,
+            killed: isRunning || state[player].penaltyPaused ? false : state[player].killed,
+            warning: isRunning || state[player].penaltyPaused ? false : state[player].warning,
+            penaltyPaused: state[player].penaltyPaused,
           };
           updateIndicator(player);
         }
@@ -124,6 +188,7 @@
 
         function connect() {
           var ws = new WebSocket(WS_URL);
+          ws.onopen = function () { activeWs = ws; };
           ws.onmessage = function (event) {
             try {
               var msg = JSON.parse(event.data);
@@ -131,16 +196,45 @@
               if (run) setRunning(run.player, run.intensity, run.running);
             } catch (e) {}
           };
-          ws.onclose = function () { setTimeout(connect, RECONNECT_MS); };
+          ws.onclose = function () {
+            if (activeWs === ws) activeWs = null;
+            setTimeout(connect, RECONNECT_MS);
+          };
           ws.onerror = function () { ws.close(); };
         }
+
+        window.addEventListener("message", function (event) {
+          var msg = event.data;
+          if (!msg || msg.source !== "subway-game") return;
+          if (msg.type === "subway:gameover" || (msg.type === "subway:phase" && msg.phase === "gameover")) {
+            clearPenalty(msg.player, true);
+          } else if (msg.type === "subway:phase" && msg.phase === "running") {
+            resumePenalty(msg.player);
+          }
+        });
 
         setInterval(function () {
           var now = Date.now();
           ["p1", "p2"].forEach(function (player) {
+            var s = state[player];
             if (state[player].seen && now - state[player].seen > STALE_MS) {
-              state[player].intensity = 0;
-              state[player].running = false;
+              s.intensity = 0;
+              s.running = false;
+              if (!s.penaltyPaused) s.idleSince = s.idleSince || now;
+            }
+            if (s.penaltyPaused) {
+              s.warning = false;
+              s.killed = false;
+              s.idleSince = 0;
+              updateIndicator(player);
+              return;
+            }
+            if (s.idleSince && !s.running) {
+              var idleFor = now - s.idleSince;
+              s.warning = idleFor >= WARNING_MS;
+              if (idleFor >= KILL_MS && !s.killed && slamLeft(player)) {
+                s.killed = true;
+              }
               updateIndicator(player);
             }
           });
