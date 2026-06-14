@@ -17,18 +17,139 @@
       }
       .p1 .tag { background: #3b82f6; }
       .p2 .tag { background: #ef4444; }
+      .run-indicator {
+        position: absolute; top: 8px; right: 8px; z-index: 10;
+        width: 150px; color: #e5e7eb; pointer-events: none;
+        font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        text-transform: uppercase; letter-spacing: 0.8px;
+      }
+      .run-indicator .run-label {
+        display: flex; justify-content: space-between; gap: 8px;
+        margin-bottom: 5px; text-shadow: 0 1px 2px #000;
+      }
+      .run-indicator .run-status { color: #9ca3af; }
+      .run-indicator.running .run-status { color: #22c55e; }
+      .run-track {
+        height: 8px; overflow: hidden; border-radius: 999px;
+        background: rgba(17, 24, 39, 0.85); border: 1px solid rgba(255, 255, 255, 0.35);
+      }
+      .run-fill {
+        width: 0%; height: 100%; background: #6b7280;
+        transition: width 80ms linear, background-color 120ms linear;
+      }
+      .run-indicator.running .run-fill { background: #22c55e; }
     </style>
   </head>
   <body>
     <div class="split">
       <div class="pane p1">
         <span class="tag">P1</span>
+        <div class="run-indicator" data-player="p1">
+          <div class="run-label"><span>run</span><span class="run-status">idle 0.00</span></div>
+          <div class="run-track"><div class="run-fill"></div></div>
+        </div>
         <iframe src="game.html?player=p1&ws=ws://localhost:8765"></iframe>
       </div>
       <div class="pane p2">
         <span class="tag">P2</span>
+        <div class="run-indicator" data-player="p2">
+          <div class="run-label"><span>run</span><span class="run-status">idle 0.00</span></div>
+          <div class="run-track"><div class="run-fill"></div></div>
+        </div>
         <iframe src="game.html?player=p2&ws=ws://localhost:8765"></iframe>
       </div>
     </div>
+    <script>
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var WS_URL = params.get("ws") || "ws://localhost:8765";
+        var RECONNECT_MS = 1000;
+        var STALE_MS = 500;
+        var state = {
+          p1: { intensity: 0, running: false, seen: 0 },
+          p2: { intensity: 0, running: false, seen: 0 },
+        };
+
+        function clamp01(value) {
+          value = Number(value) || 0;
+          return Math.max(0, Math.min(1, value));
+        }
+
+        function updateIndicator(player) {
+          var el = document.querySelector('.run-indicator[data-player="' + player + '"]');
+          if (!el) return;
+          var s = state[player];
+          var intensity = clamp01(s.intensity);
+          el.classList.toggle("running", !!s.running);
+          el.querySelector(".run-status").textContent =
+            (s.running ? "RUNNING " : "idle ") + intensity.toFixed(2);
+          el.querySelector(".run-fill").style.width = Math.round(intensity * 100) + "%";
+        }
+
+        function setRunning(player, intensity, running) {
+          if (player !== "p1" && player !== "p2") {
+            setRunning("p1", intensity, running);
+            setRunning("p2", intensity, running);
+            return;
+          }
+          state[player] = {
+            intensity: clamp01(intensity),
+            running: running !== undefined ? !!running : clamp01(intensity) > 0.05,
+            seen: Date.now(),
+          };
+          updateIndicator(player);
+        }
+
+        function runningPayload(msg) {
+          var data = msg && typeof msg.data === "object" ? msg.data : msg;
+          var type = msg && msg.type;
+          var dataType = data && data.type;
+          if (!data) return null;
+          if (
+            type !== "running" &&
+            type !== "running_state" &&
+            type !== "input:state" &&
+            dataType !== "running" &&
+            dataType !== "running_state" &&
+            !("intensity" in data && ("running" in data || "is_running" in data))
+          ) {
+            return null;
+          }
+          return {
+            player: msg.player || data.player,
+            intensity: clamp01(data.intensity),
+            running: data.running !== undefined ? data.running : data.is_running,
+          };
+        }
+
+        function connect() {
+          var ws = new WebSocket(WS_URL);
+          ws.onmessage = function (event) {
+            try {
+              var msg = JSON.parse(event.data);
+              var run = runningPayload(msg);
+              if (run) setRunning(run.player, run.intensity, run.running);
+            } catch (e) {}
+          };
+          ws.onclose = function () { setTimeout(connect, RECONNECT_MS); };
+          ws.onerror = function () { ws.close(); };
+        }
+
+        setInterval(function () {
+          var now = Date.now();
+          ["p1", "p2"].forEach(function (player) {
+            if (state[player].seen && now - state[player].seen > STALE_MS) {
+              state[player].intensity = 0;
+              state[player].running = false;
+              updateIndicator(player);
+            }
+          });
+        }, 100);
+
+        updateIndicator("p1");
+        updateIndicator("p2");
+        connect();
+      })();
+    </script>
   </body>
 </html>

@@ -257,6 +257,8 @@ class WebSocketEmitter:
         self._ws = None
         self._connected = False
         self._lane = 0
+        self._intensity = 0.0
+        self._running = False
         self._lock = threading.Lock()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -282,6 +284,7 @@ class WebSocketEmitter:
                     self._ws = ws
                     self._connected = True
                     await self._send_lane(ws)          # resync on (re)connect
+                    await self._send_running(ws)
                     hb = asyncio.ensure_future(self._heartbeat(ws))
                     try:
                         await ws.wait_closed()
@@ -299,6 +302,7 @@ class WebSocketEmitter:
             await asyncio.sleep(self.heartbeat)
             try:
                 await self._send_lane(ws)
+                await self._send_running(ws)
             except Exception:
                 return                                 # socket dead -> reconnect
 
@@ -312,9 +316,30 @@ class WebSocketEmitter:
             msg["player"] = self.player
         await ws.send(json.dumps(msg))
 
+    async def _send_running(self, ws) -> None:
+        if ws is None:
+            return
+        with self._lock:
+            intensity = self._intensity
+            running = self._running
+        msg = {
+            "type": "running",
+            "intensity": round(intensity, 3),
+            "running": running,
+        }
+        if self.player:
+            msg["player"] = self.player
+        await ws.send(json.dumps(msg))
+
     async def _send_lane_now(self) -> None:
         try:
             await self._send_lane(self._ws)
+        except Exception:
+            pass
+
+    async def _send_running_now(self) -> None:
+        try:
+            await self._send_running(self._ws)
         except Exception:
             pass
 
@@ -342,6 +367,14 @@ class WebSocketEmitter:
         if changed and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._send_lane_now(), self._loop)
         return changed
+
+    def set_intensity(self, intensity: float, running: bool = None) -> None:
+        intensity = max(0.0, min(1.0, float(intensity)))
+        with self._lock:
+            self._intensity = intensity
+            self._running = bool(intensity > 0.05 if running is None else running)
+        if self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._send_running_now(), self._loop)
 
     def event(self, kind: str) -> None:
         """One-shot jump/duck -> up/down key tap."""
@@ -770,11 +803,12 @@ class App:
         elif self.emitter is None:
             print(f"[gesture] {kind}  (t={time.perf_counter():.3f})")
 
-    def _output_intensity(self, intensity: float) -> None:
-        """Forward the live running intensity to the game (phone:running_state).
-        Only the game phone transport carries it; legacy taps have no analog."""
+    def _output_intensity(self, intensity: float, running: bool = False) -> None:
+        """Forward the live running intensity to displays that can show it."""
         if isinstance(self.emitter, GamePhoneEmitter):
             self.emitter.set_intensity(intensity)
+        elif isinstance(self.emitter, WebSocketEmitter):
+            self.emitter.set_intensity(intensity, running)
 
     def run(self) -> None:
         win = f"pose_input - {self.args.mode} lanes"
@@ -853,7 +887,7 @@ class App:
             elif gesture.duck:
                 self._output_event("duck")
         if run is not None:
-            self._output_intensity(run.intensity)
+            self._output_intensity(run.intensity, run.is_running)
             self._metrics["intensity"] = run.intensity
             self._metrics["running"] = run.is_running
 
